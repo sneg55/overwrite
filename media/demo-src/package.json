@@ -7,6 +7,7 @@
   "scripts": {
     "capture:ui": "for f in ui/*.json; do npx testreel \"$f\" --format mp4 || exit 1; done",
     "cards": "node render-cards.mjs",
+    "schematics": "node schematics/render-schematics.mjs",
     "tts": "node --env-file-if-exists=.env tts.mjs",
     "build": "node build-video.mjs",
     "speed": "ffmpeg -y -loglevel error -i out/demo.mp4 -filter_complex \"[0:v]setpts=PTS/1.25[v];[0:a]atempo=1.25[a]\" -map \"[v]\" -map \"[a]\" -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +faststart out/overwrite-demo-1.25x.mp4"

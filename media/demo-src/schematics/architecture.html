@@ -1,0 +1,155 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="base.css" />
+<style>
+  .tier { display: flex; align-items: stretch; gap: 18px; }
+  .label {
+    flex: none; width: 190px; padding-top: 22px;
+    font-size: 24px; font-weight: 650; color: var(--ink);
+  }
+  .label .path {
+    display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 15px; color: var(--faint); font-weight: 500; margin-top: 6px;
+  }
+  .panel {
+    flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px; display: flex; gap: 14px; min-width: 0;
+  }
+  .unit {
+    flex: 1; background: var(--card2); border-radius: 11px; padding: 16px 18px; min-width: 0;
+  }
+  .unit .n {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 15px; color: var(--accent); margin-bottom: 8px; word-break: break-word;
+  }
+  .unit .d { font-size: 19px; color: var(--dim); line-height: 1.45; }
+
+  .parties { display: flex; gap: 14px; margin-top: 26px; }
+  .party {
+    flex: 1; border: 1px solid var(--line); border-radius: 11px; padding: 15px 16px;
+    background: var(--card); min-width: 0;
+  }
+  .party .p {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 19px; font-weight: 600; color: var(--ink); margin-bottom: 7px;
+  }
+  .party .r { font-size: 15px; color: var(--faint); line-height: 1.4; }
+  .party .r .tag { margin-top: 7px; }
+</style>
+</head>
+<body>
+<section class="slide">
+  <div class="head"><span class="mark"></span><h1>How it is put together</h1></div>
+  <p class="sub">
+    Three layers over one Canton participant. All ledger traffic goes through a single
+    client, so every backend feature is <b>testable in isolation</b> with that client
+    stubbed.
+  </p>
+
+  <div class="tier">
+    <div class="label">Web<span class="path">web/src</span></div>
+    <div class="panel">
+      <div class="unit">
+        <div class="n">/</div>
+        <div class="d">Marketing page. Static server component: no ledger reads, no party session.</div>
+      </div>
+      <div class="unit">
+        <div class="n">/app</div>
+        <div class="d">The vault: epoch timeline, the written call, collateral locked, premium history.</div>
+      </div>
+      <div class="unit">
+        <div class="n">/app/position</div>
+        <div class="d">A depositor's own book, or the whole book for the operator.</div>
+      </div>
+      <div class="unit">
+        <div class="n">/app/reports</div>
+        <div class="d">Settlement history read off EpochReport contracts.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down">&darr;</div>
+
+  <div class="tier">
+    <div class="label">Backend<span class="path">backend/src</span></div>
+    <div class="panel">
+      <div class="unit">
+        <div class="n">epoch-scheduler</div>
+        <div class="d">Drives the lifecycle: open, lock, write, pay, settle, record, roll.</div>
+      </div>
+      <div class="unit">
+        <div class="n">oracle-poller</div>
+        <div class="d">Fetches public BTC spot and writes PriceObservation contracts.</div>
+      </div>
+      <div class="unit">
+        <div class="n">mm-simulator</div>
+        <div class="d">The buyer: takes the call, pays premium, exercises rationally at expiry.</div>
+      </div>
+      <div class="unit">
+        <div class="n">rest-api</div>
+        <div class="d">REST for the UI, through a ledger gateway.</div>
+      </div>
+      <div class="unit">
+        <div class="n">ledger-client</div>
+        <div class="d">The one shared seam to the ledger, alongside the CIP-56 registry adapter.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down">&darr;</div>
+
+  <div class="tier">
+    <div class="label">Ledger<span class="path">daml/src</span></div>
+    <div class="panel">
+      <div class="unit">
+        <div class="n">JSON Ledger API v2</div>
+        <div class="d">Canton participant. Submissions and active-contract reads, per party.</div>
+      </div>
+      <div class="unit">
+        <div class="n">package: overwrite</div>
+        <div class="d">Nine templates: the vault, positions, the call, observations, receipts, reports.</div>
+      </div>
+      <div class="unit">
+        <div class="n">CIP-56 token standard</div>
+        <div class="d">Holdings, allocations and DvP. Collateral locks through this, never a bespoke lock.</div>
+      </div>
+      <div class="unit">
+        <div class="n">CBTC registry</div>
+        <div class="d">Devnet faucet plus the registry allocation surface. Mint and burn are never touched.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="parties">
+    <div class="party">
+      <div class="p">operator</div>
+      <div class="r">Runs epochs and coordinates settlement. Real.</div>
+    </div>
+    <div class="party">
+      <div class="p">alice / bob / carol</div>
+      <div class="r">Depositors. Real, funded from the devnet CBTC faucet.</div>
+    </div>
+    <div class="party">
+      <div class="p">mm-buyer</div>
+      <div class="r">Buys the call and pays the premium.<span class="tag sim">SIMULATED</span></div>
+    </div>
+    <div class="party">
+      <div class="p">oracle</div>
+      <div class="r">Publishes BTC/USD. Self-operated, real spot data, labelled.</div>
+    </div>
+    <div class="party">
+      <div class="p">observer</div>
+      <div class="r">Third party for the privacy reveal. Sees an empty ledger.</div>
+    </div>
+  </div>
+
+  <p class="foot">
+    All demo parties are <b>backend-owned and custodial</b>. The party switcher in the UI
+    is a demo control for reading the ledger from each party's perspective, not an auth
+    boundary.
+  </p>
+</section>
+</body>
+</html>

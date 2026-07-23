@@ -27,17 +27,9 @@ running on the hackathon devnet. Deadline 2026-07-26.
 A vault runs in **epochs**. Each epoch is one full option lifecycle. Mainnet epochs
 are weekly; demo epochs are compressed to minutes (a labeled parameter).
 
-```
-open deposits
-  -> lock collateral as a CIP-56 allocation
-  -> write CallOption, market maker pays premium (PayPremium)
-  -> premium fan-out: one on-chain transfer per holder, each with a PremiumReceipt
-  -> expiry:
-       SettleOTM  (oracle price <= strike)  -> collateral returned, holders keep premium
-       SettleITM  (oracle price >  strike)  -> atomic DvP: locked CBTC swapped for strike cash
-  -> EpochReport (aggregate only)
-  -> roll into the next epoch (OTM path) unless a withdrawal was queued
-```
+![One epoch: open deposits, lock collateral as a CIP-56 allocation, write the call and
+pay the premium, then settle OTM or ITM at expiry, record the epoch and
+roll](./media/schematics/epoch-lifecycle.png)
 
 Every step is a real lifecycle state change on the ledger. There is no self-trading
 and no synthetic volume. Positions are principal-only: premium is **pushed** to holders
@@ -49,8 +41,12 @@ The core differentiator is that the per-depositor book is invisible to everyone 
 the operator and the depositor themselves. This is not a client-side filter, it is the
 Daml signatory and observer model:
 
-- A `VaultPosition` is signed by the operator and that one depositor. No depositor is a
-  stakeholder of anyone else's position.
+![Who can see what: a visibility matrix over the vault, per-depositor positions,
+receipts and reports, showing that alice cannot see bob's
+position](./media/schematics/privacy-model.png)
+
+- A `VaultPosition` is signed by the operator, with that one depositor as its **sole
+  observer**. No depositor is a stakeholder of anyone else's position.
 - `PremiumReceipt` and `SettlementReceipt` are per-depositor: the operator signs, the
   single depositor observes, and no depositor learns of any other.
 - `EpochReport` carries **aggregate** results only (settlement path, totals, depositor
@@ -80,12 +76,16 @@ control for reading the ledger from each party's perspective, not an auth bounda
 
 ## Architecture
 
+![Three layers over one Canton participant: the Next.js routes, the backend features
+behind a single ledger client, and the Daml package on the JSON Ledger API, plus the
+parties and which of them are simulated](./media/schematics/architecture.png)
+
 ```
 daml/       Daml package `overwrite`: product templates + Daml Script test suite
 backend/    TypeScript on the JSON Ledger API
 web/        Next.js 16 App Router (server components enforce the privacy reveal)
 scripts/    party setup, faucet funding, sandbox, demo/seed scenarios
-media/      demo video source (scenes, UI capture definitions, build scripts)
+media/      demo video source + the schematics above (regenerate: npm run schematics)
 ```
 
 ### Daml (`daml/src/Overwrite/`)
@@ -95,10 +95,10 @@ Nine product templates. Five are core, four are thin supporting contracts.
 | Template | Signatories | Purpose |
 |---|---|---|
 | `Vault` | operator | Epoch counter, params (epoch length, strike rule, premium split), deposit-window state. CBTC is pooled in operator custody. |
-| `VaultPosition` | operator, depositor | A depositor's principal-only CBTC claim for the epoch. Choices: `QueueWithdraw`, `PayoutPremium` (consolidation-aware). |
+| `VaultPosition` | operator (observer: one depositor) | A depositor's principal-only CBTC claim for the epoch. Choices: `QueueWithdraw`, `PayoutPremium` (consolidation-aware). |
 | `CallOption` | vault (writer), mm (buyer) | The written weekly call: notional, strike, expiry, premium. Choices: `PayPremium`, `SettleOTM`, `SettleITM`. |
 | `PriceObservation` | oracle | Asset, price, timestamp. Read by settlement, keyed by `(asset, epoch)`. |
-| `EpochReport` | operator (visible to depositors) | Per-epoch aggregate results only. No per-holder list. |
+| `EpochReport` | operator (observer: one depositor) | One per depositor per epoch, carrying aggregate results only. No per-holder list. |
 | `PremiumReceipt` | operator (observer: one depositor) | Evidence of a single premium transfer during fan-out. |
 | `SettlementReceipt` | operator (observer: one depositor) | Per-depositor record of an ITM close-out (pro-rata proceeds). |
 | `EpochSettlement` | operator, mm | The settled-epoch record: path, observed price, notional, premium. |
@@ -127,15 +127,17 @@ shared client so features are independently testable with the client stubbed.
 
 ### Web (`web/src/`)
 
-Next.js 16 App Router, three surfaces, all server-rendered with the acting party's read
-rights:
+Next.js 16 App Router. The app surfaces are all server-rendered with the acting party's
+own read rights:
 
-- `/` (Vault) - epoch timeline, current written call, collateral locked, aggregate
+- `/` - the public marketing page. A static server component: no ledger reads and no
+  party session, so it renders identically for everyone.
+- `/app` (Vault) - epoch timeline, current written call, collateral locked, aggregate
   premium history. Depositors are not stakeholders of the vault, so they are landed on
   their position instead and do not see this tab.
-- `/position` - "My position" for a depositor (their own book only) or "Vault book" for
-  the operator.
-- `/reports` - settlement history from `EpochReport`.
+- `/app/position` - "My position" for a depositor (their own book only) or "Vault book"
+  for the operator.
+- `/app/reports` - settlement history from `EpochReport`.
 
 ## Getting started
 

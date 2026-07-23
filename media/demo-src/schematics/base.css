@@ -1,0 +1,76 @@
+/* Shared styling for the README schematics. Mirrors web/src/app/styles/tokens.css so a
+   diagram reads as the same product as the app: near-black surface, bitcoin-orange
+   accent, system stack. Each schematic is its own .html file that links this. */
+
+:root {
+  --bg0: #0a0c11;
+  --ink: #eef1f6;
+  --dim: #a3abbb;
+  --faint: #6d7688;
+  --line: #232936;
+  --accent: #f7931a;
+  --accent2: #ffb454;
+  --good: #6fd08c;
+  --bad: #ff9a92;
+  --card: #11141b;
+  --card2: #171b24;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg0);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* One diagram per page. The renderer screenshots this element, so its own height is
+   the image height and no slide needs a hand-tuned clip rectangle. */
+.slide {
+  width: 1600px;
+  padding: 56px 64px 60px;
+  background:
+    radial-gradient(900px 460px at 92% -10%, rgba(247, 147, 26, 0.10) 0%, transparent 55%),
+    var(--bg0);
+  border: 1px solid var(--line);
+}
+
+.head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+.mark {
+  width: 15px; height: 15px; border-radius: 50%; align-self: center; flex: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+}
+/* Four type sizes, each a clear step from the next (38 / 24 / 19 / 15). Sizes closer
+   together than that read as one undifferentiated block at README display width. */
+h1 { font-size: 38px; font-weight: 700; letter-spacing: -0.6px; }
+.sub { font-size: 19px; color: var(--dim); margin-bottom: 40px; line-height: 1.5; }
+.sub b { color: var(--ink); font-weight: 600; }
+
+.foot {
+  margin-top: 38px; padding-top: 24px; border-top: 1px solid var(--line);
+  font-size: 19px; color: var(--faint); line-height: 1.5;
+}
+.foot b { color: var(--dim); font-weight: 600; }
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* A labelled box: what happens, the Daml choice that does it, one line of detail. */
+.box {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 22px; flex: 1; min-width: 0;
+}
+.box .t { font-size: 24px; font-weight: 650; margin-bottom: 10px; }
+.box .c {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 15px; color: var(--accent); margin-bottom: 12px; word-break: break-word;
+}
+.box .d { font-size: 19px; color: var(--dim); line-height: 1.5; }
+
+.arrow { align-self: center; color: var(--accent); font-size: 30px; flex: none; padding: 0 4px; }
+.down { text-align: center; color: var(--accent); font-size: 30px; line-height: 1; margin: 20px 0; }
+.tag {
+  display: inline-block; font-size: 15px; letter-spacing: 1.6px; font-weight: 700;
+  padding: 4px 9px; border-radius: 5px; vertical-align: middle;
+}
+.tag.sim { color: #ffcf70; background: #2a2213; border: 1px solid #5a4a20; }

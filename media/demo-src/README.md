@@ -21,10 +21,24 @@ npm run speed                # -> out/overwrite-demo-1.25x.mp4   (the deliverabl
 
 Every stage is cached, so a narration edit is `npm run tts && npm run build`.
 
+## README schematics
+
+`schematics/` renders the diagrams embedded in the root README to
+`../schematics/*.png`. Each diagram is a plain `.html` file linking `base.css`, which
+mirrors the app's design tokens so a diagram reads as the same product as the UI. The
+screenshot is taken of the `.slide` element, so a diagram's height follows its content
+and none of them need a hand-tuned clip rectangle.
+
+```bash
+npm run schematics           # -> ../schematics/{epoch-lifecycle,privacy-model,architecture}.png
+```
+
+No ledger, no network and no key: edit the HTML, re-run, commit the PNGs.
+
 ## The app has to be running first
 
 The UI scenes are recordings of the real app against a local Canton sandbox, not
-mockups. Bring the stack up before `capture:ui` (ports per `CLAUDE.local.md`):
+mockups. Bring the stack up before `capture:ui`:
 
 ```bash
 ./scripts/sandbox.sh start

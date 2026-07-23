@@ -1,0 +1,114 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="base.css" />
+<style>
+  /* Sequence is carried by the arrows and the row order, so the steps need no
+     numeric markers of their own. */
+  .row { display: flex; gap: 14px; align-items: stretch; }
+
+  /* The expiry branch: one condition box fanning into the two settlement paths. */
+  .cond {
+    flex: none; width: 320px; background: var(--card2); border: 1px solid var(--line);
+    border-radius: 14px; padding: 22px; display: flex; flex-direction: column;
+    justify-content: center;
+  }
+  .cond .t { font-size: 24px; font-weight: 650; margin-bottom: 10px; }
+  .cond .d { font-size: 19px; color: var(--dim); line-height: 1.5; }
+  .paths { flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .out { border-radius: 14px; padding: 20px 22px; border: 1px solid; }
+  .out.otm { background: rgba(111, 208, 140, 0.06); border-color: rgba(111, 208, 140, 0.34); }
+  .out.itm { background: rgba(255, 154, 146, 0.05); border-color: rgba(255, 154, 146, 0.30); }
+  .out .cap { font-size: 15px; letter-spacing: 1.6px; font-weight: 700; margin-bottom: 8px; }
+  .out.otm .cap { color: var(--good); }
+  .out.itm .cap { color: var(--bad); }
+  .out .t { font-size: 24px; font-weight: 650; margin-bottom: 8px; }
+  .out .d { font-size: 19px; color: var(--dim); line-height: 1.5; }
+  .out .c {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 15px; color: var(--accent); margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+<section class="slide">
+  <div class="head"><span class="mark"></span><h1>One epoch</h1></div>
+  <p class="sub">
+    Each epoch is a full option lifecycle, and every step is a real state change on the
+    ledger driven by a Daml choice. Mainnet epochs are weekly; demo epochs are compressed
+    to minutes, which is a <b>parameter, not a shortcut</b>.
+  </p>
+
+  <div class="row">
+    <div class="box">
+      <div class="t">Open deposits</div>
+      <div class="c">Vault.OpenDeposits, Vault.Deposit</div>
+      <div class="d">CBTC moves into the pool. Each depositor holds one VaultPosition for the epoch, topped up if they deposit again while the window is open.</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="t">Lock collateral</div>
+      <div class="c">Vault.LockCollateral</div>
+      <div class="d">The pool is locked as a CIP-56 allocation, the token standard's own lock and DvP primitive, never a bespoke Daml lock.</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="t">Write the call</div>
+      <div class="c">Vault.WriteCall, PayPremium</div>
+      <div class="d">A CallOption co-signed by the vault and the buyer. The buyer pays the premium on-ledger, against the locked collateral.</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="t">Pay the holders</div>
+      <div class="c">VaultPosition.PayoutPremium</div>
+      <div class="d">One real transfer per holder, each with its own PremiumReceipt. Premium is pushed out, never accrued as a claimable balance.</div>
+    </div>
+  </div>
+
+  <div class="down">&darr;</div>
+
+  <div class="row">
+    <div class="cond">
+      <div class="t">At expiry</div>
+      <div class="d">Settlement reads a PriceObservation contract by id, keyed by asset and epoch, with freshness and wrong-epoch guards. No price is passed in as an argument.</div>
+    </div>
+    <div class="paths">
+      <div class="out otm">
+        <div class="cap">PRICE AT OR BELOW STRIKE</div>
+        <div class="t">Out of the money</div>
+        <div class="d">The allocation is withdrawn and the collateral returns to the pool. Holders keep the premium.</div>
+        <div class="c">CallOption.SettleOTM</div>
+      </div>
+      <div class="out itm">
+        <div class="cap">PRICE ABOVE STRIKE</div>
+        <div class="t">In the money</div>
+        <div class="d">Atomic physical delivery: the locked CBTC and the cash strike leg move in a single transaction. No escrow contract risk, no public-mempool MEV.</div>
+        <div class="c">CallOption.SettleITM</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down">&darr;</div>
+
+  <div class="row">
+    <div class="box">
+      <div class="t">Record the epoch</div>
+      <div class="c">Vault.RecordEpoch</div>
+      <div class="d">An EpochReport per depositor carrying aggregate results only: settlement path, totals, depositor count. Never a per-holder payout list.</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="t">Roll</div>
+      <div class="c">Vault.RollPositions</div>
+      <div class="d">Positions carry into the next epoch unless a withdrawal was queued, in which case principal is returned at the boundary.</div>
+    </div>
+  </div>
+
+  <p class="foot">
+    The market maker and the price oracle are <span class="tag sim">SIMULATED</span> and labelled everywhere they appear.
+    Premium figures are <b>demo parameters, not market pricing</b>.
+  </p>
+</section>
+</body>
+</html>

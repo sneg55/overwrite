@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="base.css" />
+<style>
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 15px 12px; text-align: center; }
+  thead th { font-size: 19px; font-weight: 650; color: var(--ink); border-bottom: 1px solid var(--line); }
+  thead th .role { display: block; font-size: 15px; color: var(--faint); font-weight: 500; margin-top: 4px; }
+  thead th.who { text-align: left; }
+
+  tbody tr { border-bottom: 1px solid rgba(35, 41, 54, 0.7); }
+  tbody tr:last-child { border-bottom: none; }
+  td.who { text-align: left; width: 400px; }
+  td.who .name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 19px; font-weight: 600; color: var(--ink);
+  }
+  td.who .stake { font-size: 15px; color: var(--faint); margin-top: 5px; line-height: 1.4; }
+  td.who .stake b { color: var(--accent); font-weight: 600; }
+
+  /* One glyph per cell: visible or not. Colour alone never carries the meaning. */
+  .yes { color: var(--good); font-size: 24px; }
+  .no { color: #39404f; font-size: 24px; }
+
+  /* The column for the party the privacy claim is really about. */
+  col.spot { background: rgba(247, 147, 26, 0.05); }
+</style>
+</head>
+<body>
+<section class="slide">
+  <div class="head"><span class="mark"></span><h1>Who can see what</h1></div>
+  <p class="sub">
+    The per-depositor book is invisible to everyone except the operator and that one
+    depositor. This is the Daml signatory and observer model, <b>not a client-side
+    filter</b>: the web app server-renders every page with the acting party's own read
+    rights, so an empty view is real ledger visibility.
+  </p>
+
+  <table>
+    <colgroup>
+      <col /><col /><col class="spot" /><col /><col /><col />
+    </colgroup>
+    <thead>
+      <tr>
+        <th class="who">Contract on the ledger</th>
+        <th>operator<span class="role">runs the vault</span></th>
+        <th>alice<span class="role">depositor</span></th>
+        <th>bob<span class="role">depositor</span></th>
+        <th>mm-buyer<span class="role">option buyer</span></th>
+        <th>observer<span class="role">third party</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="who">
+          <div class="name">Vault</div>
+          <div class="stake">The pool and epoch state. Signed by <b>operator</b>.</div>
+        </td>
+        <td class="yes">&check;</td><td class="no">&#10007;</td><td class="no">&#10007;</td>
+        <td class="no">&#10007;</td><td class="no">&#10007;</td>
+      </tr>
+      <tr>
+        <td class="who">
+          <div class="name">VaultPosition &middot; alice</div>
+          <div class="stake">Her principal claim. Signed by <b>operator</b>, observed by <b>alice</b> alone.</div>
+        </td>
+        <td class="yes">&check;</td><td class="yes">&check;</td><td class="no">&#10007;</td>
+        <td class="no">&#10007;</td><td class="no">&#10007;</td>
+      </tr>
+      <tr>
+        <td class="who">
+          <div class="name">VaultPosition &middot; bob</div>
+          <div class="stake">Same shape, different observer. Alice is not a stakeholder of it.</div>
+        </td>
+        <td class="yes">&check;</td><td class="no">&#10007;</td><td class="yes">&check;</td>
+        <td class="no">&#10007;</td><td class="no">&#10007;</td>
+      </tr>
+      <tr>
+        <td class="who">
+          <div class="name">PremiumReceipt &middot; alice</div>
+          <div class="stake">Evidence of one premium transfer. One depositor per receipt.</div>
+        </td>
+        <td class="yes">&check;</td><td class="yes">&check;</td><td class="no">&#10007;</td>
+        <td class="no">&#10007;</td><td class="no">&#10007;</td>
+      </tr>
+      <tr>
+        <td class="who">
+          <div class="name">EpochReport &middot; alice</div>
+          <div class="stake">Aggregates only: path, totals, depositor count. Never a per-holder payout list.</div>
+        </td>
+        <td class="yes">&check;</td><td class="yes">&check;</td><td class="no">&#10007;</td>
+        <td class="no">&#10007;</td><td class="no">&#10007;</td>
+      </tr>
+      <tr>
+        <td class="who">
+          <div class="name">CallOption</div>
+          <div class="stake">The written weekly call. Co-signed by <b>operator</b> and <b>mm-buyer</b>.</div>
+        </td>
+        <td class="yes">&check;</td><td class="no">&#10007;</td><td class="no">&#10007;</td>
+        <td class="yes">&check;</td><td class="no">&#10007;</td>
+      </tr>
+      <tr>
+        <td class="who">
+          <div class="name">PriceObservation</div>
+          <div class="stake">Signed by the <b>oracle</b>, observed by <b>operator</b>. Settlement reads it by id.</div>
+        </td>
+        <td class="yes">&check;</td><td class="no">&#10007;</td><td class="no">&#10007;</td>
+        <td class="no">&#10007;</td><td class="no">&#10007;</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="foot">
+    The <b>observer</b> column is empty by construction: that party is a stakeholder of
+    nothing, so its ledger view is genuinely blank. The claim that carries real weight is
+    the depositor one, that <b>alice cannot see bob</b>. On an EVM option vault every
+    column here would be full, because depositors, vault size, strikes and roll timing
+    are public to everyone.
+  </p>
+</section>
+</body>
+</html>
