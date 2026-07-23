@@ -1,4 +1,4 @@
-# Overwrite
+![Overwrite](./media/logo/overwrite-banner.png)
 
 **CBTC covered-call vault on Canton.** Deposit CBTC, and the vault writes weekly
 physically-settled covered calls as Daml contracts, then pays the option premium to
@@ -9,18 +9,18 @@ running on the hackathon devnet. Deadline 2026-07-26.
 
 ## Why this exists
 
-- **No self-serve on-chain BTC yield on Canton.** CBTC holders have no way to earn
-  yield on-chain today. BitSafe's own vaults wrap off-chain curated strategies, and
-  on-chain option writing does not exist on Canton (verified 2026-07-06: Thetanuts
-  announced-only, D2X options not live).
-- **On EVM, the whole book is public.** On EVM option vaults, everyone can see
-  depositors, vault size, strikes, and roll timing. Market makers price against
-  visible flow, and institutions will not display their BTC holdings for anyone to
-  read. On Canton every position is a bilateral contract visible only to its parties.
-  Privacy is the product, not a feature.
-- **Settlement is atomic physical delivery.** At expiry the locked CBTC and the cash
-  strike leg move in a single transaction. No escrow contract risk, no public-mempool
-  MEV.
+CBTC holders have no way to earn yield on-chain today. BitSafe's own vaults wrap
+off-chain curated strategies, and on-chain option writing does not exist on Canton
+(verified 2026-07-06: Thetanuts announced-only, D2X options not live).
+
+The reference design for this is an EVM option vault, and its worst property is that
+everyone can see depositors, vault size, strikes and roll timing. Market makers price
+against visible flow, and institutions will not display their BTC holdings for anyone
+to read. On Canton every position is a bilateral contract visible only to its parties.
+Privacy is the product.
+
+Settlement is atomic physical delivery: at expiry the locked CBTC and the cash strike
+leg move in a single transaction. No escrow contract risk, no public-mempool MEV.
 
 ## How it works
 
@@ -37,9 +37,8 @@ as real transfers during the fan-out, never accrued as a claimable balance.
 
 ### Privacy is enforced at the ledger, not the UI
 
-The core differentiator is that the per-depositor book is invisible to everyone except
-the operator and the depositor themselves. This is not a client-side filter, it is the
-Daml signatory and observer model:
+The per-depositor book is invisible to everyone except the operator and that one
+depositor. That property comes from the Daml signatory and observer model:
 
 ![Who can see what: a visibility matrix over the vault, per-depositor positions,
 receipts and reports, showing that alice cannot see bob's
@@ -53,7 +52,7 @@ position](./media/schematics/privacy-model.png)
   count), never a per-holder payout list.
 - The `observer` party is a stakeholder of nothing, so its ledger view is genuinely
   empty. The web app server-renders every page with the acting party's own read rights,
-  so an empty view is real ledger visibility, not data fetched and then hidden.
+  so when a view comes up empty the ledger really did return nothing.
 
 ### Settlement never trusts an off-ledger number
 
@@ -178,13 +177,13 @@ real registry `AllocationFactory`.
 
 - CBTC via the devnet faucet (`cbtc-faucet.bitsafe.finance`, a plain JSON API); holdings
   and transfers via CIP-56. Demo party funding is scripted in `scripts/fund-parties`.
-- Option collateral is designed to lock through the CIP-56 **allocation surface**
+- Option collateral is designed to lock through the CIP-56 allocation surface
   (`AllocationFactory_Allocate` with `allocateBefore` / `settleBefore` windows that map
-  1:1 onto a weekly epoch), never a custom lock. This is the token standard's own
-  lock + DvP primitive.
+  1:1 onto a weekly epoch). That surface is the token standard's own lock and DvP
+  primitive, so the vault borrows it instead of inventing one.
 - The 10-UTXO soft limit per party is handled by consolidating holdings during deposit
   and premium fan-out (the cbtc-lib `check_and_consolidate` pattern).
-- **Current state, stated plainly: the package does not yet bind the real registry.**
+- **The package does not yet bind the real registry.**
   `Overwrite.Allocation` declares local `Holding`, `MockAllocation`, and
   `MockAllocationFactory` templates that mirror the CIP-56 v1 choice names. They are an
   in-memory model, not a binding. Everything you can run today (the Daml Script suite,
@@ -205,3 +204,15 @@ These are non-negotiable and baked into the UI, video, and this README:
 - The **market maker and oracle are SIMULATED** and labeled everywhere.
 - Premium figures are **demo parameters, not market pricing**. No APY or yield claims
   anywhere in this interface.
+
+## License
+
+[MIT](./LICENSE), covering the code, the Daml package and the docs in this repo.
+
+Two things under this tree are not ours to license and keep their own terms:
+
+- `daml/vendor/*.dar` are Canton Network token-standard (CIP-0056) interface packages,
+  redistributed unmodified from Digital Asset's utility bundle. See
+  [`daml/vendor/README.md`](./daml/vendor/README.md) for exact provenance and package ids.
+- `web/public/fonts/archivo-latin-var.woff2` is the Archivo typeface by Omnibus-Type,
+  under the SIL Open Font License 1.1.

@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "CBTC covered-call vault on Canton",
+  "license": "MIT",
   "workspaces": [
     "backend",
     "web"
