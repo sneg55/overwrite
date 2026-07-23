@@ -1,0 +1,319 @@
+/* Marketing landing page (`/`) - the body sections below the hero: value pillars, the
+   epoch lifecycle flow, the privacy contrast, honest limits, the closing CTA band, and
+   the footer. Shell and hero live in marketing.css. `mkt-` prefixed; tokens only. */
+
+/* ---- Pillars ---- */
+
+.mkt-pillars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  /* Wider gap than the carded sections: these are open text columns, so space (not a
+     border) does the separating. */
+  gap: var(--space-6);
+  margin-top: var(--space-6);
+}
+
+/* Pillars are deliberately NOT cards: a full-width top rule with a short accent tick
+   anchors each column, and typography carries the rest. Keeps the page from reading as
+   three identical box grids in a row. */
+.mkt-pillar {
+  position: relative;
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-strong);
+}
+
+.mkt-pillar::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: 2rem;
+  height: 2px;
+  background: var(--accent);
+}
+
+.mkt-pillar-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.mkt-card {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+}
+
+.mkt-card-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.mkt-card-body {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* ---- Epoch lifecycle flow ---- */
+
+/* The lifecycle is a real ordered sequence, so it earns numbers: a connected vertical
+   timeline (numbered nodes on a rail) rather than a flat row of identical bordered boxes. */
+.mkt-flow {
+  display: grid;
+  gap: 0;
+  counter-reset: step;
+  margin-top: var(--space-6);
+}
+
+.mkt-flow-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.75rem 1fr;
+  gap: var(--space-4);
+  align-items: start;
+  padding-bottom: var(--space-5);
+}
+
+.mkt-flow-step:last-child {
+  padding-bottom: 0;
+}
+
+/* The rail: a hairline from this node down to the next. Sits at the node's center x. */
+.mkt-flow-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: calc(1.75rem / 2 - 0.5px);
+  top: 1.75rem;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+
+.mkt-flow-step::before {
+  counter-increment: step;
+  content: counter(step);
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  /* Numerals stay in the neutral face; only the step name wears the display font. */
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+/* The two expiry outcomes are a fork inside one step, not two more steps. They sit
+   side by side once there is room, so neither reads as following the other. */
+.mkt-flow-branches {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+@media (min-width: 40rem) {
+  .mkt-flow-branches {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.mkt-flow-branch {
+  border-left: 2px solid var(--line-strong);
+  padding-left: var(--space-4);
+}
+
+.mkt-flow-name {
+  font-size: var(--text-base);
+  font-weight: 600;
+  /* Optical: pull the name up so it centers against the round node beside it. */
+  margin-top: 0.1875rem;
+}
+
+.mkt-flow-detail {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* ---- Privacy contrast ---- */
+
+.mkt-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+.mkt-compare-col {
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+}
+
+.mkt-compare-col[data-kind='public'] {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+}
+
+.mkt-compare-col[data-kind='private'] {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-1));
+  border: 1px solid var(--accent-dim);
+}
+
+/* Real column headings, not eyebrows: display face, sentence case, no tracking. The one
+   named kicker on the page is the hero's; these label the two columns of a comparison. */
+.mkt-compare-kicker {
+  margin: 0 0 var(--space-1);
+  font-family: var(--mkt-font-display);
+  font-size: var(--text-base);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  color: var(--text-2);
+}
+
+.mkt-compare-col[data-kind='private'] .mkt-compare-kicker {
+  color: var(--accent);
+}
+
+.mkt-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.mkt-list li {
+  position: relative;
+  padding-left: var(--space-4);
+}
+
+.mkt-list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: var(--radius-pill);
+  background: var(--line-strong);
+}
+
+.mkt-compare-col[data-kind='private'] .mkt-list li::before {
+  background: var(--accent);
+}
+
+/* ---- Honest limits ---- */
+
+.mkt-limits {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-4);
+}
+
+/* ---- CTA band ---- */
+
+.mkt-band {
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  gap: var(--space-4);
+  padding-block: var(--space-7);
+}
+
+.mkt-band-title {
+  margin: 0;
+  font-size: var(--mkt-h2);
+  font-weight: 640;
+  letter-spacing: -0.02em;
+}
+
+/* The lead sits inside a centered grid, so drop its bottom margin and let the grid gap
+   space it from the button. */
+.mkt-band .mkt-section-lead {
+  margin: 0;
+}
+
+/* ---- Footer ---- */
+
+.mkt-footer {
+  border-top: 1px solid var(--line);
+  padding-block: var(--space-6);
+  display: grid;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+.mkt-footer-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+/* Footer links stay visible at every width (unlike the header .mkt-nav, which hides). */
+.mkt-footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.mkt-footer a {
+  color: var(--text-2);
+}
+
+.mkt-footer a:hover {
+  color: var(--text-1);
+}
+
+.mkt-fineprint {
+  max-width: 70ch;
+  line-height: 1.5;
+}
+
+/* ---- Responsive ---- */
+
+@media (max-width: 860px) {
+  .mkt-hero-grid {
+    grid-template-columns: 1fr;
+    gap: var(--space-6);
+  }
+  /* Message first on mobile: the headline and CTA lead, the decorative card (aria-hidden,
+     meaningless without the copy) follows in source order rather than jumping above it. */
+  .mkt-pillars,
+  .mkt-compare,
+  .mkt-limits {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mkt-hero-grid > * {
+    animation: enter-rise 260ms var(--ease) backwards;
+  }
+  .mkt-hero-grid > :last-child {
+    animation-delay: 90ms;
+  }
+}

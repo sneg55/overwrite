@@ -1,0 +1,33 @@
+{
+  "name": "overwrite",
+  "private": true,
+  "version": "0.1.0",
+  "description": "CBTC covered-call vault on Canton",
+  "workspaces": [
+    "backend",
+    "web"
+  ],
+  "scripts": {
+    "lint": "bunx --bun biome check . && bunx eslint .",
+    "lint:fix": "bunx --bun biome check --write . && bunx eslint --fix .",
+    "format": "bunx --bun biome format --write .",
+    "test": "bun test",
+    "typecheck": "bun --filter '*' typecheck",
+    "test:backend": "bun --filter '@overwrite/backend' test",
+    "test:web": "bun --filter '@overwrite/web' test",
+    "test:all": "bun run lint && bun run typecheck && bun run test:backend && bun run test:web && bun --filter '@overwrite/web' build && echo 'Daml suite runs separately: cd daml && daml build && cd test && daml build && daml test'"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@types/node": "^26.1.0",
+    "bun-types": "^1.3.14",
+    "eslint": "^9.17.0",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-eslint-comments": "^3.2.0",
+    "eslint-plugin-import": "^2.31.0",
+    "eslint-plugin-security": "^3.0.1",
+    "eslint-plugin-sonarjs": "^3.0.1",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0"
+  }
+}

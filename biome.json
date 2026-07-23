@@ -1,0 +1,128 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.2/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/dist/**",
+      "!**/build/**",
+      "!**/coverage/**",
+      "!**/node_modules/**",
+      "!.claude/**",
+      "!web/.next/**",
+      "!web/next.config.mjs",
+      "!media/**"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "trailingCommas": "all"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "none",
+      "correctness": {
+        "noUnusedVariables": {
+          "level": "error",
+          "options": { "ignoreRestSiblings": true }
+        },
+        "noUnusedPrivateClassMembers": "error",
+        "noUnreachable": "error",
+        "noConstantCondition": "error",
+        "noConstantMathMinMaxClamp": "error",
+        "noInvalidUseBeforeDeclaration": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noDebugger": "error",
+        "noConsole": {
+          "level": "error",
+          "options": { "allow": ["warn", "error"] }
+        },
+        "noEmptyBlockStatements": "error",
+        "noDoubleEquals": "error",
+        "noSelfCompare": "error",
+        "noDuplicateObjectKeys": "error",
+        "noDuplicateParameters": "error",
+        "noFallthroughSwitchClause": "error",
+        "noVar": "error"
+      },
+      "style": {
+        "useConst": "error",
+        "useTemplate": "error",
+        "useShorthandAssign": "error",
+        "useConsistentArrayType": {
+          "level": "error",
+          "options": { "syntax": "shorthand" }
+        },
+        "useConsistentBuiltinInstantiation": "error",
+        "useImportType": "error",
+        "useExportType": "error",
+        "useNodejsImportProtocol": "error",
+        "useThrowOnlyError": "error",
+        "noNonNullAssertion": "error",
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "lodash": "Use native JS or lodash-es.",
+              "moment": "Use date-fns or Temporal.",
+              "axios": "Use fetch."
+            }
+          }
+        }
+      },
+      "complexity": {
+        "useOptionalChain": "error",
+        "noUselessTypeConstraint": "error",
+        "noUselessConstructor": "error",
+        "noUselessRename": "error",
+        "noUselessTernary": "error",
+        "noBannedTypes": "error"
+      },
+      "security": {
+        "noGlobalEval": "error"
+      },
+      "performance": {
+        "noDelete": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.{test,spec}.{ts,tsx}", "**/tests/**/*.{ts,tsx}"],
+      "linter": {
+        "rules": {
+          "style": { "noNonNullAssertion": "off" },
+          "suspicious": { "noEmptyBlockStatements": "off" }
+        }
+      }
+    },
+    {
+      "includes": ["**/scripts/**/*.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noConsole": "off" }
+        }
+      }
+    },
+    {
+      "includes": ["web/**"],
+      "formatter": { "enabled": false }
+    }
+  ]
+}

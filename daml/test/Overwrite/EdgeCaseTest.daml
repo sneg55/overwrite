@@ -1,0 +1,339 @@
+-- Edge-case Daml Script proofs: window enforcement, oracle guards, withdrawal,
+-- and holding consolidation. Full lifecycle paths live in Overwrite.LifecycleTest.
+module Overwrite.EdgeCaseTest where
+
+import DA.Assert ((===))
+import DA.Time (hours, addRelTime)
+import Daml.Script
+
+import Overwrite.Fixtures
+import Overwrite.Allocation
+import Overwrite.CallOption
+import Overwrite.EpochSettlement
+import Overwrite.PremiumReceipt
+import Overwrite.PriceObservation
+import Overwrite.Types
+import Overwrite.Vault
+import Overwrite.VaultPosition
+import Overwrite.TestBase
+
+-- Set up a locked vault with alice's 1 CBTC and a written+active option.
+-- Returns (parties, activeOptionCid, expiry).
+lockedActiveOption : Script (Parties, ContractId CallOption, Time)
+lockedActiveOption = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer alice "CBTC" 1.0
+  (vault0a, _) <- submitMulti [p.operator, alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0a pool
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 100.0; notionalCbtc = 1.0; expiry)
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 100.0
+  active <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+  pure (p, active, expiry)
+
+testDepositOutsideWindowRejected : Script ()
+testDepositOutsideWindowRejected = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer alice "CBTC" 1.0
+  (vault0a, _) <- submitMulti [p.operator, alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  pool <- consolidateCbtc p.operator
+  (vault1, _) <- stdLock p vault0a pool
+  -- window is now Locked; a new deposit must be rejected
+  bob <- allocateParty "bob"
+  bobCbtc <- makeHolding p.cbtcIssuer bob "CBTC" 1.0
+  submitMultiMustFail [p.operator, bob] [] $
+    exerciseCmd vault1 (Deposit with depositor = bob; cbtcCid = bobCbtc; topUpPositionCid = None)
+
+testStaleObservationRejected : Script ()
+testStaleObservationRejected = do
+  (p, active, expiry) <- lockedActiveOption
+  -- advance well past expiry, then use an observation timestamped at expiry: it is
+  -- now older than maxObservationAge (1h) relative to settlement time -> stale.
+  passTime (hours 5)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  submitMustFail p.operator $ exerciseCmd active (SettleOTM with obsCid = obs; cbtcContext = noContext)
+
+testWrongEpochObservationRejected : Script ()
+testWrongEpochObservationRejected = do
+  (p, active, expiry) <- lockedActiveOption
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 2
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  submitMustFail p.operator $ exerciseCmd active (SettleOTM with obsCid = obs; cbtcContext = noContext)
+
+testSettleAtStrikeIsOTM : Script ()
+testSettleAtStrikeIsOTM = do
+  (p, active, expiry) <- lockedActiveOption
+  buyerCash <- makeHolding p.operator p.mmBuyer "mUSDC" 66000.0
+  cashAlloc <- allocateCash p buyerCash
+  passTime (hours 2)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 66000.0; source = "test"; observedAt = expiry; isDemo = True
+  submitMustFail p.operator $
+    exerciseCmd active (SettleITM with obsCid = obs; cashAllocationCid = cashAlloc; cbtcContext = noContext; cashContext = noContext)
+  (withdrawRes, _) <- submit p.operator $ exerciseCmd active (SettleOTM with obsCid = obs; cbtcContext = noContext)
+  [returnedIfc] <- pure withdrawRes.senderHoldingCids
+  let returned = asHolding returnedIfc
+  Some collateral <- queryContractId p.operator returned
+  collateral.owner === p.operator
+  collateral.instrument === "CBTC"
+  collateral.amount === 1.0
+
+testWithdrawReturnsPrincipalAndSkipsRollover : Script ()
+testWithdrawReturnsPrincipalAndSkipsRollover = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer alice "CBTC" 1.0
+  (_, posA) <- submitMulti [p.operator, alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  posA1 <- submit alice $ exerciseCmd posA QueueWithdraw
+  -- rollover must be rejected for a withdrawing position
+  submitMustFail p.operator $ exerciseCmd posA1 RollOver
+  -- operator returns her principal from the pooled CBTC
+  poolCbtc <- findHolding p.operator "CBTC" p.operator
+  returned <- submit p.operator $ exerciseCmd posA1 (ReturnPrincipal with cbtcCid = poolCbtc)
+  Some rc <- queryContractId alice returned
+  rc.owner === alice
+  rc.amount === 1.0
+
+testConsolidation : Script ()
+testConsolidation = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
+  carol <- allocateParty "carol"
+  vault0 <- newVault p
+  -- Deposit is consuming: each call archives its input vault cid and returns the
+  -- next one, so this must thread the cid through the three sequential deposits.
+  let deposit v party = do
+        cbtc <- makeHolding p.cbtcIssuer party "CBTC" 1.0
+        (v', _) <- submitMulti [p.operator, party] [] $
+          exerciseCmd v (Deposit with depositor = party; cbtcCid = cbtc; topUpPositionCid = None)
+        pure v'
+  vault1 <- deposit vault0 alice
+  vault2 <- deposit vault1 bob
+  _ <- deposit vault2 carol
+  -- operator now holds 3 separate CBTC UTXOs; consolidate to one
+  pool <- consolidateCbtc p.operator
+  Some poolH <- queryContractId p.operator pool
+  poolH.amount === 3.0
+
+-- ── Negative tests: the new guards reject malicious/invalid inputs ────────────
+
+testSettleBeforeExpiryRejected : Script ()
+testSettleBeforeExpiryRejected = do
+  (p, active, expiry) <- lockedActiveOption
+  -- no passTime: ledger time is still before expiry, so settlement must reject
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  submitMustFail p.operator $ exerciseCmd active (SettleOTM with obsCid = obs; cbtcContext = noContext)
+
+testWrongOracleRejected : Script ()
+testWrongOracleRejected = do
+  (p, active, expiry) <- lockedActiveOption
+  rogue <- allocateParty "rogue-oracle"
+  passTime (hours 2)
+  obs <- submit rogue $ createCmd PriceObservation with
+    oracleParty = rogue; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "rogue"; observedAt = expiry; isDemo = True
+  submitMustFail p.operator $ exerciseCmd active (SettleOTM with obsCid = obs; cbtcContext = noContext)
+
+testItmUnderpaidCashRejected : Script ()
+testItmUnderpaidCashRejected = do
+  (p, active, expiry) <- lockedActiveOption
+  -- strike = 60000 * 1.1 = 66000; notional 1.0 -> the cash leg must be exactly 66000
+  underpaid <- makeHolding p.operator p.mmBuyer "mUSDC" 1000.0
+  cashAlloc <- allocateCash p underpaid
+  passTime (hours 2)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 70000.0; source = "test"; observedAt = expiry; isDemo = True
+  submitMustFail p.operator $
+    exerciseCmd active (SettleITM with obsCid = obs; cashAllocationCid = cashAlloc; cbtcContext = noContext; cashContext = noContext)
+
+testSettleItmWrongCashReceiverRejected : Script ()
+testSettleItmWrongCashReceiverRejected = do
+  (p, active, expiry) <- lockedActiveOption
+  buyerCash <- makeHolding p.operator p.mmBuyer "mUSDC" 66000.0
+  cashAlloc <- allocateCashTo p p.mmBuyer buyerCash
+  passTime (hours 2)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 70000.0; source = "test"; observedAt = expiry; isDemo = True
+  -- Every earlier cash-leg guard matches. This must fail with
+  -- "cash leg: wrong receiver" before either transfer executes.
+  submitMustFail p.operator $
+    exerciseCmd active (SettleITM with obsCid = obs; cashAllocationCid = cashAlloc; cbtcContext = noContext; cashContext = noContext)
+
+testWriteCallNotionalMismatchRejected : Script ()
+testWriteCallNotionalMismatchRejected = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer alice "CBTC" 1.0
+  (vault0a, _) <- submitMulti [p.operator, alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0a pool
+  -- collateral covers 1.0 CBTC; writing a 2.0 notional must be rejected. Both
+  -- WriteCall controllers (operator, mmBuyer) authorize, so the rejection proves
+  -- the notional guard, not a missing-authority error.
+  submitMultiMustFail [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 100.0; notionalCbtc = 2.0; expiry)
+
+testWriteCallWrongCollateralReceiverRejected : Script ()
+testWriteCallWrongCollateralReceiverRejected = do
+  p <- setupParties
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault0a, _) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  pool <- consolidateCbtc p.operator
+  (vault1, _) <- stdLock p vault0a pool
+  wrongCollateral <- makeHolding p.cbtcIssuer p.operator "CBTC" 1.0
+  wrongAlloc <- submit p.operator $ exerciseCmd wrongCollateral (Allocate with
+    executor = p.operator
+    receiver = p.alice
+    allocateBefore = addRelTime now (hours 48)
+    settleBefore = addRelTime now (hours 48)
+    requestedAt = now)
+  -- Every earlier collateral guard matches. This must fail with
+  -- "write: collateral receiver != buyer".
+  submitMultiMustFail [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = wrongAlloc; spotAtOpen = 60000.0
+      premiumUsdc = 100.0; notionalCbtc = 1.0; expiry)
+
+-- Positions are now fetched by cid, so an operator can no longer pass a bare
+-- duplicate party list. The equivalent attack is a depositor who legitimately
+-- deposits twice in the same epoch: two distinct VaultPosition contracts, same
+-- depositor. RecordEpoch must still reject that, since it would double-count the
+-- depositor in the aggregate and produce two report copies to the same party.
+testRecordEpochDuplicateDepositorsRejected : Script ()
+testRecordEpochDuplicateDepositorsRejected = do
+  p <- setupParties
+  now <- getTime
+  vault0 <- newVault p
+  aliceCbtc1 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault0a, posA1) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = aliceCbtc1; topUpPositionCid = None)
+  aliceCbtc2 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault0b, posA2) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0a (Deposit with depositor = p.alice; cbtcCid = aliceCbtc2; topUpPositionCid = None)
+  settlementCid <- submitMulti [p.operator, p.mmBuyer] [] $ createCmd EpochSettlement with
+    operator = p.operator; mmBuyer = p.mmBuyer; epochNumber = 1; settlementPath = OTM
+    observedPrice = 60000.0; strikeUsdcPerCbtc = 66000.0; notionalCbtc = 2.0
+    premiumUsdc = 0.0; collateralReturned = True; tsSettled = now
+  submitMustFail p.operator $
+    exerciseCmd vault0b (RecordEpoch with
+      positionCids = [posA1, posA2]; receiptCids = []; settlementCid)
+
+testRecordEpochRejectsWrongEpochSettlement : Script ()
+testRecordEpochRejectsWrongEpochSettlement = do
+  p <- setupParties
+  fixture <- twoDepositorSettledEpoch p
+  wrongSettlementCid <- submitMulti [p.operator, p.mmBuyer] [] $ createCmd EpochSettlement with
+    operator = p.operator; mmBuyer = p.mmBuyer; epochNumber = 2; settlementPath = OTM
+    observedPrice = 60000.0; strikeUsdcPerCbtc = 66000.0; notionalCbtc = 3.0
+    premiumUsdc = 300.0; collateralReturned = True; tsSettled = fixture.expiry
+  submitMustFail p.operator do
+    exerciseCmd fixture.vaultCid RecordEpoch with
+      positionCids = [fixture.alicePosition, fixture.bobPosition]
+      receiptCids = [fixture.aliceReceipt, fixture.bobReceipt]
+      settlementCid = wrongSettlementCid
+
+testRecordEpochRejectsUnderDistributedPremium : Script ()
+testRecordEpochRejectsUnderDistributedPremium = do
+  p <- setupParties
+  fixture <- twoDepositorSettledEpoch p
+  shortBobReceipt <- submit p.operator $ createCmd PremiumReceipt with
+    operator = p.operator
+    depositor = fixture.bob
+    epochNumber = fixture.epochNumber
+    premiumPaidUsdc = 150.0
+    transferRef = "under-distributed"
+  submitMustFail p.operator do
+    exerciseCmd fixture.vaultCid RecordEpoch with
+      positionCids = [fixture.alicePosition, fixture.bobPosition]
+      receiptCids = [fixture.aliceReceipt, shortBobReceipt]
+      settlementCid = fixture.epochSettlementCid
+
+testOperatorCannotForgeSettlement : Script ()
+testOperatorCannotForgeSettlement = do
+  p <- setupParties
+  now <- getTime
+  submitMustFail p.operator $ createCmd EpochSettlement with
+    operator = p.operator; mmBuyer = p.mmBuyer; epochNumber = 1; settlementPath = OTM
+    observedPrice = 60000.0; strikeUsdcPerCbtc = 66000.0; notionalCbtc = 1.0
+    premiumUsdc = 100.0; collateralReturned = True; tsSettled = now
+
+-- M3 regression. RecordEpoch advances the vault to epoch N+1, but epoch N's positions
+-- are closed out later, by a separate RollPositions choice on a separate submission.
+-- The deposit window must stay CLOSED across that gap: RollPositions overwrites
+-- totalPooledCbtc with the rolled principal rather than adding to it, so a deposit
+-- accepted in between is silently dropped from the pooled total while the depositor's
+-- CBTC sits in operator custody, and the vault can never record another epoch.
+--
+-- Nothing else in this suite exercises the gap, which is why the bug survived: every
+-- other test either deposits before RecordEpoch or after RollPositions.
+testDepositBetweenRecordAndRollRejected : Script ()
+testDepositBetweenRecordAndRollRejected = do
+  p <- setupParties
+  fixture <- twoDepositorSettledEpoch p
+  (vaultAtN1, _) <- submit p.operator $
+    exerciseCmd fixture.vaultCid RecordEpoch with
+      positionCids = [fixture.alicePosition, fixture.bobPosition]
+      receiptCids = [fixture.aliceReceipt, fixture.bobReceipt]
+      settlementCid = fixture.epochSettlementCid
+
+  -- The vault now reads as epoch N+1, but the epoch-N positions are still unrolled.
+  dave <- allocateParty "dave"
+  daveCbtc <- makeHolding p.cbtcIssuer dave "CBTC" 1.0
+  submitMultiMustFail [p.operator, dave] [] $
+    exerciseCmd vaultAtN1 Deposit with depositor = dave; cbtcCid = daveCbtc; topUpPositionCid = None
+
+-- ...and the window reopens once the roll has actually run, so the close above is a
+-- pause rather than a deadlock.
+testDepositAllowedAfterRoll : Script ()
+testDepositAllowedAfterRoll = do
+  p <- setupParties
+  fixture <- twoDepositorSettledEpoch p
+  (vaultAtN1, _) <- submit p.operator $
+    exerciseCmd fixture.vaultCid RecordEpoch with
+      positionCids = [fixture.alicePosition, fixture.bobPosition]
+      receiptCids = [fixture.aliceReceipt, fixture.bobReceipt]
+      settlementCid = fixture.epochSettlementCid
+  (vaultRolled, _) <- submit p.operator $
+    exerciseCmd vaultAtN1 RollPositions with
+      positionCids = [fixture.alicePosition, fixture.bobPosition]
+      settlementCid = fixture.epochSettlementCid
+      poolCid = Some fixture.recoveredPoolCid
+      proceedsCid = None
+
+  dave <- allocateParty "dave"
+  daveCbtc <- makeHolding p.cbtcIssuer dave "CBTC" 1.0
+  _ <- submitMulti [p.operator, dave] [] $
+    exerciseCmd vaultRolled Deposit with depositor = dave; cbtcCid = daveCbtc; topUpPositionCid = None
+  pure ()

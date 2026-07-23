@@ -1,0 +1,145 @@
+-- Post-settlement position lifecycle: what depositors own once an epoch closes.
+-- Split out of Vault.daml (the starter-patterns file-size rule): the two
+-- settlement branches are the bulk of the logic, so Vault.RollPositions is a
+-- thin choice wrapper around runRollPositions below.
+--
+-- The settlement path decides what depositors own. After OTM, Allocation_Withdraw
+-- returned the collateral to the vault, so a withdrawing depositor is paid
+-- principal in CBTC out of the recovered pool and everyone else rolls with
+-- principal unchanged. After ITM, the CBTC was delivered to the buyer via atomic
+-- DvP and the vault holds strike cash instead, so every position closes against
+-- its pro-rata share of the proceeds. Rolling after ITM would mint a CBTC claim
+-- the vault cannot honor, so that branch is not offered: runRollPositions only
+-- ever rolls on the OTM path.
+module Overwrite.Rollover where
+
+import DA.Action (foldlA)
+import DA.Foldable (mapA_)
+import DA.List (init, last)
+
+import Overwrite.Allocation
+import Overwrite.EpochSettlement
+import Overwrite.Types
+import Overwrite.VaultPosition
+
+-- Everything RollPositions needs to decide and execute the roll, kept as one
+-- record so Vault.RollPositions can hand off in a single call.
+data RollPositionsArgs = RollPositionsArgs
+  with
+    operator : Party
+    epochNumber : Int          -- the vault's CURRENT epoch counter (post-RecordEpoch)
+    cashInstrument : Text
+    positionCids : [ContractId VaultPosition]
+    settlementCid : ContractId EpochSettlement
+    poolCid : Optional (ContractId Holding)
+    proceedsCid : Optional (ContractId Holding)
+
+-- Returns the vault's next `totalPooledCbtc` and the cids of positions that
+-- rolled into the next epoch (empty on the ITM path).
+runRollPositions : RollPositionsArgs -> Update (Decimal, [ContractId VaultPosition])
+runRollPositions args = do
+  settlement <- fetch args.settlementCid
+  positions <- mapA fetch args.positionCids
+  assertMsg "roll: settlement from wrong epoch"
+    (settlement.epochNumber == args.epochNumber - 1)
+  assertMsg "roll: settlement from wrong operator"
+    (settlement.operator == args.operator)
+  mapA_ (\pos -> do
+      -- These positions belong to the epoch that just closed, one behind the
+      -- vault's counter after RecordEpoch advanced it.
+      assertMsg "roll: position from wrong epoch" (pos.epochNumber == args.epochNumber - 1)
+      assertMsg "roll: position from wrong vault" (pos.operator == args.operator))
+    positions
+
+  let totalPrincipal = sum (map (.principalCbtc) positions)
+  assertMsg "roll: no positions" (totalPrincipal > 0.0)
+
+  case settlement.settlementPath of
+    OTM -> rollOtm args positions totalPrincipal
+    ITM -> closeItm args positions totalPrincipal
+
+-- OTM: the recovered pool must exist, must be CBTC owned by the operator, and
+-- must cover every principal claim exactly. Pay each withdrawer their principal
+-- by splitting the pool, then roll the rest. `Holding.Split` requires
+-- splitAmount < amount strictly, so if the pool remaining exactly equals the
+-- current withdrawer's principal (no further claim on the pool, e.g. a single
+-- depositor withdrawing whole, or the last withdrawer once every other position
+-- has already rolled or been paid), hand the whole pool holding to
+-- ReturnPrincipal instead of splitting it. The pool tracks totalPrincipal minus
+-- every principal already paid out, so that equality can only be reached on the
+-- final iteration of the fold: it is safe to keep pairing the (now archived)
+-- cid back into the accumulator, because nothing downstream will fetch or
+-- exercise it again.
+rollOtm : RollPositionsArgs -> [VaultPosition] -> Decimal -> Update (Decimal, [ContractId VaultPosition])
+rollOtm args positions totalPrincipal = do
+  poolCidValue <- case args.poolCid of
+    None -> abort "roll: OTM requires the recovered collateral pool"
+    Some cid -> pure cid
+  assertMsg "roll: ITM proceeds must not be supplied on the OTM path" (args.proceedsCid == None)
+  pool <- fetch poolCidValue
+  assertMsg "roll: pool owned by operator" (pool.owner == args.operator)
+  assertMsg "roll: pool not CBTC" (pool.instrument == "CBTC")
+  assertMsg "roll: pool does not cover principal" (pool.amount == totalPrincipal)
+
+  (_, rolledCids) <- foldlA
+    (\(poolAcc, acc) (cid, pos) ->
+      if pos.withdrawQueued
+        then do
+          poolNow <- fetch poolAcc
+          if poolNow.amount == pos.principalCbtc
+            then do
+              _ <- exercise cid ReturnPrincipal with cbtcCid = poolAcc
+              pure (poolAcc, acc)
+            else do
+              (chunkCid, restCid) <- exercise poolAcc Split with splitAmount = pos.principalCbtc
+              _ <- exercise cid ReturnPrincipal with cbtcCid = chunkCid
+              pure (restCid, acc)
+        else do
+          rolledCid <- exercise cid RollOver
+          pure (poolAcc, acc ++ [rolledCid]))
+    (poolCidValue, [])
+    (zip args.positionCids positions)
+
+  let rolledPrincipal = sum [ pos.principalCbtc | pos <- positions, not pos.withdrawQueued ]
+  pure (rolledPrincipal, rolledCids)
+
+-- ITM: no CBTC remains, so no pool may be supplied. Every position closes
+-- against its pro-rata share of the strike proceeds; nothing rolls. The last
+-- position takes whatever remains, so rounding never strands dust.
+closeItm : RollPositionsArgs -> [VaultPosition] -> Decimal -> Update (Decimal, [ContractId VaultPosition])
+closeItm args positions totalPrincipal = do
+  assertMsg "roll: ITM must not be handed a collateral pool" (args.poolCid == None)
+  proceedsCidValue <- case args.proceedsCid of
+    None -> abort "roll: ITM requires the strike proceeds"
+    Some cid -> pure cid
+  proceeds <- fetch proceedsCidValue
+  assertMsg "roll: proceeds owned by operator" (proceeds.owner == args.operator)
+  assertMsg "roll: proceeds wrong instrument" (proceeds.instrument == args.cashInstrument)
+
+  -- `CloseWithProceeds` is consuming (it archives the cash holding handed to it
+  -- via Transfer), so the fold must never pass the same cid to two positions.
+  -- Every position but the last splits off its exact pro-rata share and passes
+  -- the chunk on; the last position always takes the whole remaining holding,
+  -- so rounding remainders land on the last depositor rather than being
+  -- silently stranded, and no earlier iteration can accidentally consume the
+  -- holding a later iteration still needs.
+  let totalProceeds = proceeds.amount
+  let entries = zip args.positionCids positions
+  let leadEntries = init entries
+  let (lastCid, _) = last entries
+
+  cashAcc <- foldlA
+    (\acc (cid, pos) -> do
+      let share = totalProceeds * pos.principalCbtc / totalPrincipal
+      (chunkCid, restCid) <- exercise acc Split with splitAmount = share
+      _ <- exercise cid CloseWithProceeds with
+        proceedsUsdc = share; usdcCid = chunkCid; transferRef = "itm-settlement"
+      pure restCid)
+    proceedsCidValue
+    leadEntries
+
+  cash <- fetch cashAcc
+  _ <- exercise lastCid CloseWithProceeds with
+    proceedsUsdc = cash.amount; usdcCid = cashAcc; transferRef = "itm-settlement"
+
+  pure (0.0, [])

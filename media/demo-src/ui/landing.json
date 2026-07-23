@@ -1,0 +1,27 @@
+{
+  "$schema": "../node_modules/testreel/recording-definition.schema.json",
+  "url": "http://localhost:3000/",
+  "viewport": { "width": 1280, "height": 720 },
+  "colorScheme": "dark",
+  "outputFormat": "mp4",
+  "cursor": {
+    "enabled": true,
+    "size": 26,
+    "color": "#f7931a",
+    "rippleColor": "#ffb454",
+    "rippleSize": 44,
+    "idleHide": false,
+    "transitionMs": 650
+  },
+  "steps": [
+    { "action": "wait", "ms": 3200 },
+    { "action": "scroll", "y": 620 },
+    { "action": "wait", "ms": 2600 },
+    { "action": "scroll", "y": 700 },
+    { "action": "wait", "ms": 2600 },
+    { "action": "scroll", "y": 700 },
+    { "action": "wait", "ms": 2800 },
+    { "action": "scroll", "y": 700 },
+    { "action": "wait", "ms": 2800 }
+  ]
+}

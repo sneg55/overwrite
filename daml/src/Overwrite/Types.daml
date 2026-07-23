@@ -1,0 +1,24 @@
+-- Shared enums for the Overwrite lifecycle. Kept in one module to avoid import
+-- cycles between the templates.
+module Overwrite.Types where
+
+-- Deposit window / epoch phase of a Vault. No `Settling` state: settlement is a
+-- single atomic choice on `CallOption` (SettleOTM/SettleITM), so the vault never
+-- sits in an intermediate settling window between Locked and the next Open.
+data WindowState
+  = Open      -- accepting deposits
+  | Locked    -- collateral allocated, option written
+  deriving (Eq, Show)
+
+-- Which way an epoch settled.
+data SettlementPath
+  = OTM  -- price <= strike: collateral returns to the vault
+  | ITM  -- price > strike: atomic DvP, collateral to buyer, cash to vault
+  deriving (Eq, Show)
+
+-- Lifecycle state of a CallOption.
+data OptionState
+  = Written  -- created, premium not yet paid
+  | Active   -- premium paid
+  | Settled  -- expired and settled
+  deriving (Eq, Show)

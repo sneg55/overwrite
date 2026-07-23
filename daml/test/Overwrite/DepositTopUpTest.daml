@@ -1,0 +1,134 @@
+-- One VaultPosition per depositor per epoch, enforced by topping up rather than by
+-- creating a second position.
+--
+-- RecordEpoch asserts `unique depositors` (see testRecordEpochDuplicateDepositorsRejected
+-- in EdgeCaseTest), but Deposit used to create a new position every time. A depositor
+-- who deposited into an epoch where they already held a position therefore produced an
+-- epoch the ledger would never record: the operator's scheduler failed on every tick and
+-- the vault stopped advancing permanently. Found live on the sandbox, 2026-07-23.
+--
+-- Deposit and RecordDeposit now take `topUpPositionCid`, and fold the deposit into the
+-- named position. The cid is caller-supplied (Daml cannot query the ACS), so it is
+-- untrusted input and every way of attaching a deposit to the wrong book is checked.
+module Overwrite.DepositTopUpTest where
+
+import DA.Assert ((===))
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.EpochSettlement
+import Overwrite.Types
+import Overwrite.Vault
+import Overwrite.VaultPosition
+
+import Overwrite.TestBase
+
+-- Alice's second deposit in one epoch lands in her existing position, not beside it.
+testTopUpSumsIntoOnePosition : Script ()
+testTopUpSumsIntoOnePosition = do
+  p <- setupParties
+  vault0 <- newVault p
+  cbtc1 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault1, pos1) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = cbtc1; topUpPositionCid = None)
+
+  cbtc2 <- makeHolding p.cbtcIssuer p.alice "CBTC" 0.5
+  (vault2, pos2) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault1 (Deposit with
+      depositor = p.alice; cbtcCid = cbtc2; topUpPositionCid = Some pos1)
+
+  -- The old position is gone, not merely superseded: one depositor, one position.
+  original <- queryContractId p.operator pos1
+  original === None
+
+  Some position <- queryContractId p.operator pos2
+  position.principalCbtc === 1.5
+  position.depositor === p.alice
+  position.epochNumber === 1
+
+  -- The vault's pooled total counts both deposits exactly once.
+  Some vault <- queryContractId p.operator vault2
+  vault.totalPooledCbtc === 1.5
+
+-- The whole point: an epoch containing a topped-up position is recordable. This is the
+-- state the vault used to wedge on.
+testToppedUpEpochRecords : Script ()
+testToppedUpEpochRecords = do
+  p <- setupParties
+  now <- getTime
+  vault0 <- newVault p
+  cbtc1 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault1, pos1) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = cbtc1; topUpPositionCid = None)
+  cbtc2 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault2, pos2) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault1 (Deposit with
+      depositor = p.alice; cbtcCid = cbtc2; topUpPositionCid = Some pos1)
+
+  premium <- makeHolding p.operator p.operator "mUSDC" 100.0
+  (_, receipt) <- submit p.operator $
+    exerciseCmd pos2 (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = premium; transferRef = "e1-alice")
+
+  settlementCid <- submitMulti [p.operator, p.mmBuyer] [] $ createCmd EpochSettlement with
+    operator = p.operator; mmBuyer = p.mmBuyer; epochNumber = 1; settlementPath = OTM
+    observedPrice = 60000.0; strikeUsdcPerCbtc = 66000.0; notionalCbtc = 2.0
+    premiumUsdc = 100.0; collateralReturned = True; tsSettled = now
+
+  -- Before the fix this was two positions for alice and RecordEpoch refused it, on
+  -- every retry, forever.
+  _ <- submit p.operator $
+    exerciseCmd vault2 (RecordEpoch with
+      positionCids = [pos2]; receiptCids = [receipt]; settlementCid)
+  pure ()
+
+-- A cid the caller does not own must not become a deposit target: crediting someone
+-- else's position is a theft primitive, not a bookkeeping slip.
+testTopUpRejectsAnotherDepositorsPosition : Script ()
+testTopUpRejectsAnotherDepositorsPosition = do
+  p <- setupParties
+  bob <- allocateParty "bob"
+  vault0 <- newVault p
+  bobCbtc <- makeHolding p.cbtcIssuer bob "CBTC" 1.0
+  (vault1, bobPos) <- submitMulti [p.operator, bob] [] $
+    exerciseCmd vault0 (Deposit with depositor = bob; cbtcCid = bobCbtc; topUpPositionCid = None)
+
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  submitMultiMustFail [p.operator, p.alice] [] $
+    exerciseCmd vault1 (Deposit with
+      depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = Some bobPos)
+
+-- A position from a previous epoch is not this epoch's book, so folding into it would
+-- both misreport the epoch and resurrect a settled position.
+testTopUpRejectsWrongEpochPosition : Script ()
+testTopUpRejectsWrongEpochPosition = do
+  p <- setupParties
+  vault0 <- newVault p
+  cbtc1 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault1, pos1) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = cbtc1; topUpPositionCid = None)
+
+  -- Roll the position into epoch 2 while the vault stays on epoch 1, so the cid is
+  -- alice's own and current, and wrong only in its epoch.
+  rolled <- submit p.operator $ exerciseCmd pos1 RollOver
+
+  cbtc2 <- makeHolding p.cbtcIssuer p.alice "CBTC" 0.5
+  submitMultiMustFail [p.operator, p.alice] [] $
+    exerciseCmd vault1 (Deposit with
+      depositor = p.alice; cbtcCid = cbtc2; topUpPositionCid = Some rolled)
+
+-- Principal under a queued withdrawal leaves at the epoch boundary. Folding a new
+-- deposit into it would send that deposit straight back out again.
+testTopUpRejectsWithdrawQueuedPosition : Script ()
+testTopUpRejectsWithdrawQueuedPosition = do
+  p <- setupParties
+  vault0 <- newVault p
+  cbtc1 <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault1, pos1) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = cbtc1; topUpPositionCid = None)
+  queued <- submit p.alice $ exerciseCmd pos1 QueueWithdraw
+
+  cbtc2 <- makeHolding p.cbtcIssuer p.alice "CBTC" 0.5
+  submitMultiMustFail [p.operator, p.alice] [] $
+    exerciseCmd vault1 (Deposit with
+      depositor = p.alice; cbtcCid = cbtc2; topUpPositionCid = Some queued)

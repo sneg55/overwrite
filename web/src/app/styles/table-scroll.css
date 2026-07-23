@@ -1,0 +1,20 @@
+/* Horizontal scroll affordance for `.table-scroll` (base rule in components.css).
+
+   The base rule sets overflow-x: auto but paints no cue that a table is clipped, so on a
+   narrow viewport the operator's book hid its Withdrawal column off-screen with nothing to
+   say it could be scrolled. These layered gradients paint a soft shadow at whichever edge
+   still has content off-screen, and nothing at all when the table fits, by tracking the
+   scroll position through background-attachment. (Lea Verou's CSS scroll-shadow technique.)
+
+   The cover panels use --surface-1 because a `.table-scroll` sits inside a `.card`, whose
+   background is --surface-1; they hide the shadow at an end once it is fully scrolled to. */
+.table-scroll {
+  background:
+    linear-gradient(to right, var(--surface-1) 30%, transparent) 0 0 / 2.75rem 100% no-repeat,
+    linear-gradient(to left, var(--surface-1) 30%, transparent) 100% 0 / 2.75rem 100% no-repeat,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.55), transparent) 0 0 / 1.1rem 100%
+      no-repeat,
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.55), transparent) 100% 0 / 1.1rem
+      100% no-repeat;
+  background-attachment: local, local, scroll, scroll;
+}

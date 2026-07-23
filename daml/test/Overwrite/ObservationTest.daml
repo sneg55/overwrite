@@ -1,0 +1,56 @@
+-- Proofs for PriceObservation.Revise: a revised observation archives the one it
+-- supersedes, and only the oracle may revise. Split into its own module (rather
+-- than appended to EdgeCaseTest) so EdgeCaseTest stays under the 300-line
+-- file-size hook.
+module Overwrite.ObservationTest where
+
+import Daml.Script
+
+import Overwrite.PriceObservation
+import Overwrite.TestBase
+
+-- A revised observation archives the one it supersedes, so a settle choice cannot
+-- reach back for a stale-but-still-in-window price. LF 2 has no contract keys, so
+-- this archive-on-revise is how "latest wins" is enforced.
+testRevisedObservationArchivesPredecessor : Script ()
+testRevisedObservationArchivesPredecessor = do
+  p <- setupParties
+  now <- getTime
+  oldCid <- submit p.oracle do
+    createCmd PriceObservation with
+      oracleParty = p.oracle
+      operator = p.operator
+      asset = "CBTC"
+      epochNumber = 1
+      price = 60000.0
+      source = "test"
+      observedAt = now
+      isDemo = True
+
+  newCid <- submit p.oracle do
+    exerciseCmd oldCid Revise with newPrice = 70000.0; newObservedAt = now
+
+  old <- queryContractId p.operator oldCid
+  assertMsg "superseded observation must be archived" (old == None)
+  fresh <- queryContractId p.operator newCid
+  case fresh of
+    None -> abort "revised observation missing"
+    Some o -> assertMsg "revised price" (o.price == 70000.0)
+
+-- Only the oracle may revise its own observation.
+testNonOracleCannotRevise : Script ()
+testNonOracleCannotRevise = do
+  p <- setupParties
+  now <- getTime
+  obsCid <- submit p.oracle do
+    createCmd PriceObservation with
+      oracleParty = p.oracle
+      operator = p.operator
+      asset = "CBTC"
+      epochNumber = 1
+      price = 60000.0
+      source = "test"
+      observedAt = now
+      isDemo = True
+  submitMustFail p.operator do
+    exerciseCmd obsCid Revise with newPrice = 1.0; newObservedAt = now

@@ -1,0 +1,88 @@
+-- Daml Script proofs for the real-CBTC path choices (RecordDeposit, LockCollateralReal).
+-- The real registry is not available in-memory, so these simulate the post-move state:
+-- the operator already owns the CBTC holding, read through the CIP-56 Holding interface
+-- exactly as a real registry holding would be. The mock Holding stands in for the real
+-- one because both implement TH.Holding.
+module Overwrite.RealPathTest where
+
+import DA.Assert ((===))
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.Types
+import Overwrite.Vault
+import Overwrite.VaultPosition
+import Overwrite.TestBase
+import qualified Splice.Api.Token.HoldingV1 as TH
+
+-- RecordDeposit records a VaultPosition against CBTC already in operator custody,
+-- without transferring (the registry move ran before this choice).
+recordDepositCreatesPositionInOperatorCustody : Script ()
+recordDepositCreatesPositionInOperatorCustody = do
+  p <- setupParties
+  vault0 <- newVault p
+  opHolding <- makeHolding p.cbtcIssuer p.operator "CBTC" 0.5
+  (vault1, posCid) <- submit p.operator $ exerciseCmd vault0
+    (RecordDeposit with
+      depositor = p.alice
+      cbtcCid = toInterfaceContractId @TH.Holding opHolding
+      topUpPositionCid = None)
+  Some pos <- queryContractId p.operator posCid
+  pos.depositor === p.alice
+  pos.principalCbtc === 0.5
+  Some vault <- queryContractId p.operator vault1
+  vault.totalPooledCbtc === 0.5
+
+-- RecordDeposit refuses CBTC that is NOT in operator custody (the move must have run).
+recordDepositRejectsNonOperatorHolding : Script ()
+recordDepositRejectsNonOperatorHolding = do
+  p <- setupParties
+  vault0 <- newVault p
+  aliceHolding <- makeHolding p.cbtcIssuer p.alice "CBTC" 0.5
+  submitMustFail p.operator $ exerciseCmd vault0
+    (RecordDeposit with
+      depositor = p.alice
+      cbtcCid = toInterfaceContractId @TH.Holding aliceHolding
+      topUpPositionCid = None)
+
+-- RecordDeposit refuses a below-minimum holding (minDepositCbtc = 0.01 in newVault).
+recordDepositRejectsBelowMinimum : Script ()
+recordDepositRejectsBelowMinimum = do
+  p <- setupParties
+  vault0 <- newVault p
+  opHolding <- makeHolding p.cbtcIssuer p.operator "CBTC" 0.005
+  submitMustFail p.operator $ exerciseCmd vault0
+    (RecordDeposit with
+      depositor = p.alice
+      cbtcCid = toInterfaceContractId @TH.Holding opHolding
+      topUpPositionCid = None)
+
+-- LockCollateralReal locks an interface-typed operator pool via the (locally mock)
+-- AllocationFactory. Proves the interface-typed lock body matches LockCollateral's
+-- behaviour: window Locked, one CBTC allocation of the pooled notional.
+lockCollateralRealLocksInterfacePool : Script ()
+lockCollateralRealLocksInterfacePool = do
+  p <- setupParties
+  vault0 <- newVault p
+  -- One depositor's CBTC recorded (pooled in operator custody), then locked.
+  opHolding <- makeHolding p.cbtcIssuer p.operator "CBTC" 0.5
+  (vault1, _) <- submit p.operator $ exerciseCmd vault0
+    (RecordDeposit with
+      depositor = p.alice
+      cbtcCid = toInterfaceContractId @TH.Holding opHolding
+      topUpPositionCid = None)
+  (requestedAt, allocateBefore, settleBefore) <- lockWindow
+  (vault2, _) <- submit p.operator $ exerciseCmd vault1
+    (LockCollateralReal with
+      cbtcPoolCid = toInterfaceContractId @TH.Holding opHolding
+      mmBuyer = p.mmBuyer
+      factoryCid = p.factory
+      allocContext = noContext
+      requestedAt
+      allocateBefore
+      settleBefore)
+  Some vault <- queryContractId p.operator vault2
+  vault.windowState === Locked
+  allocs <- query @MockAllocation p.operator
+  let cbtcAllocs = [a | (_, a) <- allocs, a.instrument == "CBTC", a.amount == 0.5]
+  length cbtcAllocs === 1

@@ -1,0 +1,50 @@
+/* The party-switch veil.
+
+   A switch is a soft server-action transition, so React keeps the previous page on screen
+   until the new party's render commits; on the operator's book that would leave another
+   depositor's rows visible for the second or two the re-read takes. The veil covers the
+   whole viewport for that window and says what is happening. It is portalled to <body>
+   (see PartySelect) so the sticky header's backdrop-filter does not trap its fixed
+   positioning inside the header band.
+
+   No fade-in: the point is to hide stale data the instant the switch starts, so it appears
+   at full opacity. Only the mark pulses, as a quiet "working" cue. */
+.switch-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.switch-veil .brand-mark {
+  width: 0.875rem;
+  height: 0.875rem;
+  margin-top: 0;
+  animation: veil-pulse 1s var(--ease) infinite;
+}
+
+.switch-veil-text {
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+@keyframes veil-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch-veil .brand-mark {
+    animation: none;
+  }
+}

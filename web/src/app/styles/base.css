@@ -1,0 +1,318 @@
+/* Reset, document rhythm, and the app shell (header, nav, main). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+/* The ring is a box-shadow, so it already follows each element's own radius. Setting
+   a radius here would reshape the element on focus. */
+:where(a, button, select, input, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Visible to assistive tech only. Not `display: none`, which screen readers skip. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard users land here first; it stays out of the layout until focused. */
+.skip-link {
+  position: absolute;
+  left: var(--space-4);
+  top: var(--space-4);
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-3);
+  color: var(--text-1);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform var(--duration) var(--ease);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
+
+/* ---- Header ---- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-1) 70%, transparent);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* An anchor to home, so it must clear the 44px touch target even though the wordmark is
+     shorter. min-height gives the hit area without changing the header row height (the nav
+     links already set it). */
+  min-height: 44px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-1);
+  /* Now an anchor back to the marketing home, so it needs the underline stripped. */
+  text-decoration: none;
+}
+
+.brand-mark {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  /* Optical: a small dot on a text baseline sits high when centered geometrically. */
+  margin-top: 1px;
+}
+
+.nav {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  /* 44px minimum hit area, from padding rather than a fixed height. */
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  /* Never `transition: all`. Naming the properties keeps layout off the compositor. */
+  transition:
+    color var(--duration) var(--ease),
+    background-color var(--duration) var(--ease),
+    scale var(--duration) var(--ease);
+}
+
+.nav-link:hover {
+  color: var(--text-1);
+  background: var(--surface-2);
+}
+
+/* Tactile press. 0.96 is the floor: anything lower reads as exaggerated. */
+.nav-link:active {
+  scale: 0.96;
+}
+
+.nav-link[aria-current='page'] {
+  color: var(--text-1);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+/* ---- Main ---- */
+
+.main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.page-head {
+  display: grid;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
+}
+
+.page-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.page-subtitle {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+/* ---- Enter ----
+
+   Split into semantic chunks (page head, then each card) and staggered, rather than
+   fading the whole container as one block. `backwards` holds the from-state during
+   the delay, so nothing flashes at full opacity before its turn. */
+
+@keyframes enter-rise {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+.main > * {
+  animation: enter-rise 220ms var(--ease) backwards;
+  /* Grid items default to min-width:auto, which is min-content. Without this, a card
+     holding a wide table (its own .table-scroll notwithstanding) refuses to shrink below
+     that table and forces the whole page to scroll sideways on narrow screens. */
+  min-width: 0;
+}
+
+.main > :nth-child(2) {
+  animation-delay: 70ms;
+}
+
+.main > :nth-child(3) {
+  animation-delay: 140ms;
+}
+
+.main > :nth-child(n + 4) {
+  animation-delay: 200ms;
+}
+
+/* --duration only zeroes transitions; keyframes need their own guard. */
+@media (prefers-reduced-motion: reduce) {
+  .main > * {
+    animation: none;
+  }
+}
+
+/* ---- Small screens ----
+
+   The header stops being one flex row. Brand and switcher share the top row; the nav
+   drops to its own row and scrolls horizontally rather than wrapping into a ragged
+   two-line block. Below 380px the stat tiles go single-column. */
+
+@media (max-width: 640px) {
+  .header {
+    display: grid;
+    /* minmax(0, 1fr), not 1fr: a bare `1fr` track carries an `auto` minimum, so it
+       refuses to shrink below the switcher's min-content width (the widest option,
+       "mm-buyer (Market maker (simulated))"). The min-width:0 on .switcher-select below
+       cannot take effect while the track it sits in is still sized to that content, so
+       the header ran ~9px past a 375px viewport and gave the whole page a horizontal
+       scrollbar. Flooring the track at 0 is what actually lets the select truncate. */
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      'brand switcher'
+      'nav nav';
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .brand {
+    grid-area: brand;
+  }
+
+  .switcher {
+    grid-area: switcher;
+    /* Stretch to fill the track and push the select to the right from the inside, rather
+       than `justify-self: end`. An end-aligned item is sized to its own content, so it
+       keeps the select at its full min-content width and overflows the track no matter
+       what min-width the select carries. Stretching is what hands the select a real
+       upper bound to truncate against. */
+    justify-self: stretch;
+    display: flex;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+
+  /* The label is redundant once space is tight; the select keeps its aria-label. */
+  .switcher-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .switcher-select {
+    /* An explicit width, not just max-width. A <select> sizes to its widest option
+       ("mm-buyer (Market maker (simulated))"), and with `width: auto` it keeps that
+       270px preferred size and overflows the header: min-width:0 and max-width:100%
+       both leave the auto width free to win, which is why this row still ran past a
+       375px viewport after those were added. Pinning the width to the track is what
+       forces the truncation. The native dropdown still lists every option in full. */
+    width: 100%;
+    min-width: 0;
+    text-overflow: ellipsis;
+  }
+
+  .nav {
+    grid-area: nav;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* Bleed to the header edges so the scroll looks intentional. */
+    margin: 0 calc(-1 * var(--space-4));
+    padding: 0 var(--space-4);
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-link {
+    flex: 0 0 auto;
+  }
+
+  .main {
+    padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+}
+
+@media (max-width: 380px) {
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* A two-column stat row cannot hold both halves at this width. */
+  .stat {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+}

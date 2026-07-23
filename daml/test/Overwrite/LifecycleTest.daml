@@ -1,0 +1,241 @@
+-- Full-lifecycle Daml Script proofs: OTM path, ITM path (atomic DvP), and
+-- multi-depositor fan-out. Edge cases live in Overwrite.EdgeCaseTest.
+module Overwrite.LifecycleTest where
+
+import DA.Assert ((===))
+import DA.List (head)
+import DA.Time (hours, addRelTime)
+import Daml.Script
+
+import Overwrite.Fixtures
+import Overwrite.Allocation
+import Overwrite.CallOption
+import Overwrite.EpochReport
+import Overwrite.PriceObservation
+import Overwrite.Types
+import Overwrite.Vault
+import Overwrite.VaultPosition
+import Overwrite.TestBase
+
+-- ── Full OTM lifecycle (1 depositor) ─────────────────────────────────────────
+
+testFullOtm : Script ()
+testFullOtm = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer alice "CBTC" 1.0
+  (vault0a, posA) <- submitMulti [p.operator, alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0a pool
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 100.0; notionalCbtc = 1.0; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 100.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  premiumInVault <- findHolding p.operator "mUSDC" p.operator
+  (_, receiptA) <- submit p.operator $
+    exerciseCmd posA (PayoutPremium with premiumUsdc = 100.0; usdcCid = premiumInVault; transferRef = "e1-alice")
+
+  -- settlement must be at/after expiry: advance ledger time past it
+  passTime (hours 2)
+  -- OTM: price (60000) <= strike (60000 * 1.1 = 66000)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  (withdrawRes, settlementCid) <- submit p.operator $
+    exerciseCmd optionActive (SettleOTM with obsCid = obs; cbtcContext = noContext)
+  [returnedIfc] <- pure withdrawRes.senderHoldingCids
+  let returned = asHolding returnedIfc
+
+  Some rc <- queryContractId p.operator returned
+  rc.owner === p.operator
+  rc.instrument === "CBTC"
+
+  (_, reports) <- submit p.operator $
+    exerciseCmd vault1 (RecordEpoch with
+      positionCids = [posA]; receiptCids = [receiptA]; settlementCid)
+  [reportA] <- pure reports
+  Some rep <- queryContractId alice reportA
+  rep.settlementPath === OTM
+  rep.depositorCount === 1
+
+  Some rcpt <- queryContractId alice receiptA
+  rcpt.premiumPaidUsdc === 100.0
+
+-- ── Full ITM lifecycle with atomic DvP (1 depositor) ─────────────────────────
+
+testFullItm : Script ()
+testFullItm = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer alice "CBTC" 1.0
+  (vault0a, _) <- submitMulti [p.operator, alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0a pool
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 100.0; notionalCbtc = 1.0; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 100.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  -- buyer allocates the strike payment (66000 mUSDC), executor = operator
+  buyerCash <- makeHolding p.operator p.mmBuyer "mUSDC" 66000.0
+  cashAlloc <- allocateCash p buyerCash
+
+  passTime (hours 2)
+  -- ITM: price (70000) > strike (66000). Atomic DvP in one submission.
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 70000.0; source = "test"; observedAt = expiry; isDemo = True
+  (cbtcRes, cashRes, _) <- submit p.operator $
+    exerciseCmd optionActive (SettleITM with obsCid = obs; cashAllocationCid = cashAlloc; cbtcContext = noContext; cashContext = noContext)
+  [cbtcIfc] <- pure cbtcRes.receiverHoldingCids
+  [cashIfc] <- pure cashRes.receiverHoldingCids
+  let cbtcToBuyer = asHolding cbtcIfc
+  let cashToVault = asHolding cashIfc
+
+  Some cb <- queryContractId p.mmBuyer cbtcToBuyer
+  cb.owner === p.mmBuyer      -- CBTC delivered to buyer
+  Some cv <- queryContractId p.operator cashToVault
+  cv.owner === p.operator     -- strike cash delivered to vault
+  cv.amount === 66000.0
+
+-- ── Multi-depositor fan-out: N receipts, aggregate leaks no per-party list ────
+
+testMultiDepositorFanout : Script ()
+testMultiDepositorFanout = do
+  p <- setupParties
+  alice <- allocateParty "alice"
+  bob <- allocateParty "bob"
+  carol <- allocateParty "carol"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+
+  vault0 <- newVault p
+  -- Deposit is consuming: each call archives its input vault cid and returns the
+  -- next one, so this must thread the cid through the three sequential deposits.
+  let deposit v party = do
+        cbtc <- makeHolding p.cbtcIssuer party "CBTC" 1.0
+        submitMulti [p.operator, party] [] $
+          exerciseCmd v (Deposit with depositor = party; cbtcCid = cbtc; topUpPositionCid = None)
+  (vault0a, posA) <- deposit vault0 alice
+  (vault0b, posB) <- deposit vault0a bob
+  (vault0c, posC) <- deposit vault0b carol
+
+  -- one allocation for the pooled 3.0 CBTC
+  pool <- consolidateCbtc p.operator
+  Some poolH <- queryContractId p.operator pool
+  poolH.amount === 3.0
+  (vault1, allocCid) <- stdLock p vault0c pool
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 300.0; notionalCbtc = 3.0; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 300.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  -- fan-out: carve the pooled 300 into 3 x 100 real transfers, one receipt each
+  vaultUsdc <- findHolding p.operator "mUSDC" p.operator
+  (chunkA, rest1) <- submit p.operator $ exerciseCmd vaultUsdc (Split with splitAmount = 100.0)
+  (chunkB, chunkC) <- submit p.operator $ exerciseCmd rest1 (Split with splitAmount = 100.0)
+  (_, receiptA) <- submit p.operator $ exerciseCmd posA (PayoutPremium with premiumUsdc = 100.0; usdcCid = chunkA; transferRef = "e1-a")
+  (_, receiptB) <- submit p.operator $ exerciseCmd posB (PayoutPremium with premiumUsdc = 100.0; usdcCid = chunkB; transferRef = "e1-b")
+  (_, receiptC) <- submit p.operator $ exerciseCmd posC (PayoutPremium with premiumUsdc = 100.0; usdcCid = chunkC; transferRef = "e1-c")
+
+  passTime (hours 2)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  (_, settlementCid) <- submit p.operator $
+    exerciseCmd optionActive (SettleOTM with obsCid = obs; cbtcContext = noContext)
+
+  (_, reports) <- submit p.operator $
+    exerciseCmd vault1 (RecordEpoch with
+      positionCids = [posA, posB, posC]; receiptCids = [receiptA, receiptB, receiptC]
+      settlementCid)
+  length reports === 3
+
+  -- privacy: alice sees exactly her own report + receipt, and NOT bob's
+  aliceReports <- query @EpochReport alice
+  length aliceReports === 1
+  aliceSeesOwn <- queryContractId alice receiptA
+  assertMsg "alice should see her own receipt" (aliceSeesOwn /= None)
+  aliceSeesBob <- queryContractId alice receiptB
+  aliceSeesBob === None
+  -- bob likewise sees exactly his own single report (no cross-depositor visibility)
+  bobReports <- query @EpochReport bob
+  length bobReports === 1
+
+  -- The settlement facts ride along on the report, so a depositor can see WHY the
+  -- epoch settled as it did. EpochSettlement carries both figures but is signatory
+  -- operator, mmBuyer with no depositor observer, so this copy is the only way alice
+  -- ever reads them. Strike is derived (spotAtOpen * strikePct), not passed to
+  -- WriteCall, so it is asserted against the same 60000 * 1.1 the OTM check above uses.
+  case aliceReports of
+    [(_, report)] -> do
+      report.observedPrice === Some 60000.0
+      report.strikeUsdcPerCbtc === Some 66000.0
+    _ -> abort "expected exactly one report for alice"
+
+-- ── RecordEpoch derives its aggregates from the ledger, not the operator ──────
+
+-- RecordEpoch must derive its aggregates from the positions and receipts it is
+-- handed, never from operator-supplied totals.
+testRecordEpochDerivesAggregates : Script ()
+testRecordEpochDerivesAggregates = do
+  p <- setupParties
+  -- Build an epoch with two depositors, one of whom has queued a withdrawal.
+  fixture <- twoDepositorSettledEpoch p
+
+  (vaultCid, reportCids) <- submit p.operator do
+    exerciseCmd fixture.vaultCid RecordEpoch with
+      positionCids = [fixture.alicePosition, fixture.bobPosition]
+      receiptCids = [fixture.aliceReceipt, fixture.bobReceipt]
+      settlementCid = fixture.epochSettlementCid
+
+  -- Two reports, one per depositor, each carrying derived aggregates.
+  assertMsg "two reports" (length reportCids == 2)
+  aliceReport <- queryContractId p.alice (head reportCids)
+  case aliceReport of
+    None -> abort "alice cannot see her report"
+    Some r -> do
+      assertMsg "derived notional" (r.totalNotionalCbtc == fixture.totalPrincipal)
+      assertMsg "derived premium" (r.totalPremiumUsdc == fixture.totalPremium)
+      assertMsg "derived count" (r.depositorCount == 2)
+
+  -- The counter advanced and the pool is empty until positions roll (Task 6b).
+  v <- queryContractId p.operator vaultCid
+  case v of
+    None -> abort "vault missing"
+    Some vault -> do
+      assertMsg "counter advanced" (vault.epochNumber == fixture.epochNumber + 1)
+      assertMsg "pool emptied" (vault.totalPooledCbtc == 0.0)
+
+-- An operator that omits a position from the list cannot thereby shrink the report.
+testRecordEpochRejectsIncompletePositionList : Script ()
+testRecordEpochRejectsIncompletePositionList = do
+  p <- setupParties
+  fixture <- twoDepositorSettledEpoch p
+  submitMustFail p.operator do
+    exerciseCmd fixture.vaultCid RecordEpoch with
+      positionCids = [fixture.alicePosition]  -- bob omitted
+      receiptCids = [fixture.aliceReceipt, fixture.bobReceipt]
+      settlementCid = fixture.epochSettlementCid

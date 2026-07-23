@@ -1,0 +1,44 @@
+# Daml package manifest for `overwrite`.
+#
+# Daml 3.x (latest stable 3.4.11), aligned with the devnet Canton 3.x line
+# (HackCanton JSON Ledger API reports Canton 3.5.6, verified 2026-07-06). The 3.x
+# SDK produces DARs deployable to that devnet; the in-memory Daml Script proofs
+# (spikes 0.2/0.3) also run on it.
+sdk-version: "3.4.11"
+name: overwrite-vault
+version: 1.2.0
+source: src
+# The HEAD of the deployed devnet lineage: overwrite-vault 1.1.0, package id
+# bffa00c2...5a5d5, uploaded as overwrite-vault-1.1.0-2234d8c.dar and vetted on the
+# participant 2026-07-22. The 1.0.0 root (0494aacd...4b51f) is kept beside it in
+# baseline/ as the lineage's origin; a candidate must be a valid upgrade of BOTH, and
+# 1.2.0 was checked against each in turn (2026-07-23).
+#
+# `daml build` runs the same upgrade validation devnet runs, so an incompatible change
+# fails here instead of after a manual round-trip through the noders group. `daml build`
+# alone never checks this, which is how the 0.1.1 rebind reached devnet and came back
+# NOT_VALID_UPGRADE_PACKAGE. Pointing this at any DAR other than a deployed one yields a
+# check that passes and proves nothing. Verified discriminating on 2026-07-23 by a
+# negative control: changing a choice's return type fails the build with "The upgraded
+# choice OpenDeposits cannot change its return type."
+upgrades: baseline/overwrite-vault-1.1.0-deployed.dar
+# Templates only. daml-script is intentionally NOT a dependency here so the DAR
+# uploaded to devnet stays lean. Daml Script tests live in the sibling
+# `test/` package (see multi-package.yaml).
+dependencies:
+  - daml-prim
+  - daml-stdlib
+# CIP-56 token-standard interface packages (v1, version 1.0.0). Vendored under
+# vendor/ and pinned by content hash; every package id is vetted on the HackCanton
+# devnet participant (see docs/spikes/0.1-interface-signatures.md and
+# vendor/README.md for provenance). These let Overwrite templates bind the real
+# Allocation / Holding interfaces instead of mirroring them with concrete
+# templates. mint/burn DARs are intentionally NOT depended on: Overwrite never
+# touches them.
+data-dependencies:
+  - vendor/splice-api-token-metadata-v1.dar
+  - vendor/splice-api-token-holding-v1.dar
+  - vendor/splice-api-token-allocation-v1.dar
+  - vendor/splice-api-token-allocation-instruction-v1.dar
+  - vendor/splice-api-token-allocation-request-v1.dar
+  - vendor/splice-api-token-transfer-instruction-v1.dar

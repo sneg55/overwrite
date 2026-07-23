@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  /* Mirrors web/src/app/styles/tokens.css so the cards read as the same product as
+     the UI footage: near-black surface, bitcoin-orange brand accent. */
+  :root {
+    --bg0: #0a0c11; --bg1: #11141b;
+    --ink: #eef1f6; --dim: #a3abbb; --line: #232936;
+    --accent: #f7931a; --accent2: #ffb454;
+    --good: #6fd08c; --bad: #ff9a92; --hi: #ffcf70;
+    --card: #11141b; --card2: #171b24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(1100px 620px at 88% -8%, rgba(247, 147, 26, 0.14) 0%, transparent 55%),
+      radial-gradient(900px 560px at 4% 104%, rgba(127, 182, 255, 0.07) 0%, transparent 52%),
+      var(--bg0);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #stage { width: 1920px; height: 1080px; position: relative; }
+  .pad { position: absolute; inset: 0; display: flex; flex-direction: column;
+         justify-content: center; padding: 150px 190px; gap: 34px; }
+  .brandrow { display: flex; align-items: baseline; gap: 22px; }
+  .dot { width: 26px; height: 26px; border-radius: 50%;
+         background: linear-gradient(135deg, var(--accent), var(--accent2)); align-self: center; }
+  .brand { font-size: 108px; font-weight: 800; letter-spacing: -2px;
+           background: linear-gradient(120deg, #fff 20%, var(--accent) 90%);
+           -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { font-size: 46px; color: var(--ink); font-weight: 500; }
+  .tag { font-size: 30px; color: var(--dim); letter-spacing: 3px; text-transform: uppercase; }
+  .h { font-size: 40px; color: var(--dim); font-weight: 600; letter-spacing: 1px; margin-bottom: 6px; }
+  .bul { display: flex; flex-direction: column; gap: 26px; }
+  .bul .row { display: flex; align-items: center; gap: 26px; font-size: 48px; font-weight: 600; }
+  .bul .mk { color: var(--accent); font-size: 40px; }
+  /* bars */
+  .unit { font-size: 30px; color: var(--dim); letter-spacing: 2px; }
+  .bars { display: flex; flex-direction: column; gap: 40px; margin-top: 10px; }
+  .bar .lab { font-size: 38px; margin-bottom: 12px; color: var(--ink); }
+  .bar .track { height: 62px; background: var(--card2); border-radius: 12px; overflow: hidden; position: relative; }
+  .bar .fill { height: 100%; border-radius: 12px; display: flex; align-items: center; justify-content: flex-end;
+               padding-right: 24px; font-size: 40px; font-weight: 800; color: #08101f; }
+  .fill.base { background: linear-gradient(90deg, #46557f, #5b6b93); }
+  .fill.win { background: linear-gradient(90deg, var(--good), #6ee7b7); }
+  .callout { position: absolute; right: 190px; top: 150px; font-size: 96px; font-weight: 800; color: var(--good); }
+  /* terminal */
+  .term { width: 100%; background: #0a1120; border: 1px solid var(--line); border-radius: 16px;
+          box-shadow: 0 30px 90px rgba(0,0,0,.5); overflow: hidden; }
+  .term .tb { height: 52px; background: #101a2e; display: flex; align-items: center; gap: 12px; padding: 0 22px; }
+  .term .tl { width: 15px; height: 15px; border-radius: 50%; }
+  .tl.r { background: #ff5f57; } .tl.y { background: #febc2e; } .tl.g { background: #28c840; }
+  .term .body { padding: 40px 44px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 34px; line-height: 1.55; }
+  .term .pr { color: var(--accent); margin-bottom: 20px; }
+  .term .pr::before { content: "$ "; color: var(--dim); }
+  .ln { white-space: pre-wrap; }
+  .ln.plain { color: var(--ink); } .ln.good { color: var(--good); } .ln.bad { color: var(--bad); }
+  .ln.hi { color: var(--hi); } .ln.dim { color: var(--dim); }
+</style>
+</head>
+<body>
+  <div id="stage"><div class="pad" id="pad"></div></div>
+<script>
+  const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
+  const pad = document.getElementById('pad');
+
+  function title(b) {
+    const br = el('div', 'brandrow');
+    br.append(el('span', 'dot'), el('div', 'brand', b.brand));
+    pad.append(br);
+    if (b.sub) pad.append(el('div', 'sub', b.sub));
+    if (b.tag) pad.append(el('div', 'tag', b.tag));
+  }
+  function bullets(b) {
+    if (b.title) pad.append(el('div', 'h', b.title));
+    const wrap = el('div', 'bul');
+    for (const r of b.rows) {
+      const row = el('div', 'row');
+      row.append(el('span', 'mk', '→'), el('span', null, r));
+      wrap.append(row);
+    }
+    pad.append(wrap);
+  }
+  function bars(b) {
+    if (b.callout) { const c = el('div', 'callout', b.callout); document.getElementById('stage').append(c); }
+    if (b.unit) pad.append(el('div', 'unit', b.unit));
+    const wrap = el('div', 'bars');
+    for (const r of b.rows) {
+      const bar = el('div', 'bar');
+      bar.append(el('div', 'lab', r.label));
+      const track = el('div', 'track');
+      const fill = el('div', 'fill ' + (r.cls || 'base'));
+      fill.style.width = Math.max(6, (r.value / b.max) * 100) + '%';
+      fill.textContent = Number.isInteger(r.value) ? r.value.toFixed(2) : r.value.toFixed(2);
+      track.append(fill); bar.append(track); wrap.append(bar);
+    }
+    pad.append(wrap);
+  }
+  function term(b) {
+    const t = el('div', 'term');
+    const tb = el('div', 'tb');
+    tb.append(el('span', 'tl r'), el('span', 'tl y'), el('span', 'tl g'));
+    const body = el('div', 'body');
+    body.append(el('div', 'pr', b.prompt));
+    for (const l of b.lines) body.append(el('div', 'ln ' + (l.cls || 'plain'), l.text));
+    t.append(tb, body); pad.append(t);
+  }
+  const R = { title, bullets, bars, term };
+
+  window.__show = (scene) => {
+    pad.innerHTML = '';
+    document.querySelectorAll('.callout').forEach((n) => n.remove());
+    const b = scene.block;
+    if (!b || !R[b.type]) throw new Error('unknown block for scene ' + scene.id);
+    R[b.type](b);
+    return true;
+  };
+</script>
+</body>
+</html>

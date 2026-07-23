@@ -1,0 +1,70 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+# Local backups of .env carry the same secrets; never commit them.
+.env.bak-*
+*.log
+.DS_Store
+.cache/
+coverage/
+
+# Local working notes and tooling config: authoring instructions, implementation
+# plans, design records, review output, and the local tool ledgers. All of it is
+# scaffolding for building the thing, not part of the thing. The published repo is
+# the code plus the READMEs that explain how to run it.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+**/.harness/
+.impeccable/
+.superpowers/
+.github/hooks/
+plans/
+docs/
+product-critic-output/
+overwrite-product-spec.md
+web/UI-POLISH.md
+
+# Canton sandbox runtime logs
+daml/log/
+
+# Daml build output (any package's .daml/ dir + DARs)
+**/.daml/
+daml/dist/
+*.dar
+# ...except vendored token-standard interface DARs, which are pinned deps, not
+# build output (see daml/vendor/README.md).
+!daml/vendor/*.dar
+# ...and except the deployed devnet baseline, which daml.yaml's `upgrades:` key
+# validates every build against. It is not a dependency and not build output: it
+# is the artifact a candidate must prove itself a valid upgrade of. Committing it
+# makes that check reproducible for anyone who builds this repo, rather than
+# resting on a file in one person's Downloads folder.
+!daml/baseline/*.dar
+
+# Next.js
+web/.next/
+web/out/
+web/next-env.d.ts
+
+# bun
+.bun/
+
+# Separate project living alongside this repo; not part of Overwrite
+appsfactory-agent/
+
+# Local Canton sandbox runtime (pid, logs)
+.sandbox/
+
+# Local design-reference screenshots (not part of the app or docs)
+web/v2-hero.png
+web/v2-full.png
+
+# Demo video: the SOURCE (scenes.json, ui/*.json, cards/, the scripts) is committed,
+# the artefacts are not. Renders are reproducible from source with `npm run
+# cards && npm run tts && npm run build`, and the mp4s are tens of megabytes each.
+media/demo-src/out/
+media/demo-src/testreel-output/
+media/*.mp4

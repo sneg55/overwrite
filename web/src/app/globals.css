@@ -1,0 +1,20 @@
+/* Layered so each file stays small and single-purpose:
+   tokens     -> raw values (color, space, type, elevation)
+   base       -> reset, document rhythm, app shell
+   components -> card, stat, table, badge, party switcher
+   table-scroll -> horizontal scroll-shadow affordance for wide tables
+   switch-veil -> full-viewport cover shown while a party switch is in flight
+   states     -> empty / error / note, and loading skeletons
+   actions    -> buttons, pills, forms, timeline, countdown
+   deposit    -> hero amount field, its summary, and the review dialog
+   marketing  -> the public landing page at `/` (shell/hero, then sections) */
+@import './styles/tokens.css';
+@import './styles/base.css';
+@import './styles/components.css';
+@import './styles/table-scroll.css';
+@import './styles/switch-veil.css';
+@import './styles/states.css';
+@import './styles/actions.css';
+@import './styles/deposit.css';
+@import './styles/marketing.css';
+@import './styles/marketing-sections.css';

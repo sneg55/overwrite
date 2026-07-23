@@ -1,0 +1,18 @@
+-- Per-depositor record of an ITM close-out: the epoch's call was exercised, the
+-- vault sold the pooled CBTC at the strike, and this depositor received their
+-- pro-rata share of the proceeds in cash. Mirrors PremiumReceipt: the operator
+-- signs, the single depositor observes, and no depositor learns of any other.
+module Overwrite.SettlementReceipt where
+
+template SettlementReceipt
+  with
+    operator : Party
+    depositor : Party
+    epochNumber : Int
+    principalCbtc : Decimal   -- the principal that was sold at the strike
+    proceedsUsdc : Decimal    -- pro-rata share of strike * notional
+    transferRef : Text
+  where
+    signatory operator
+    observer depositor
+    ensure principalCbtc > 0.0 && proceedsUsdc > 0.0

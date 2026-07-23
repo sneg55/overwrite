@@ -1,0 +1,146 @@
+-- In-memory Daml Script proofs for the settlement spikes, now against the REAL
+-- CIP-56 allocation interface (Splice.Api.Token.AllocationV1), not the local mirror.
+--
+-- Spike 0.3: an allocation cycle runs (Allocation_Withdraw returns the holding).
+-- Spike 0.2: both legs settle in ONE transaction (atomic DvP), the crown-jewel beat.
+-- Plus the OTM path (withdraw returns collateral to the vault).
+--
+-- Key difference from the mirror these replace: the real Allocation_ExecuteTransfer
+-- is controlled by [executor, sender, receiver], NOT executor alone, and the
+-- receiver is fixed in the allocation (transferLeg.receiver), not chosen at settle
+-- time. So the atomic settle is submitted by {executor, receiver}, which is what the
+-- product's CallOption coordination contract carries. See docs/spikes/0.2-dvp-transcript.md.
+module Overwrite.AllocationTest where
+
+import DA.Assert ((===))
+import DA.Date (Month(..), date)
+import DA.Time (time)
+import Daml.Script
+
+import Overwrite.Allocation
+import qualified Splice.Api.Token.AllocationV1 as TA
+
+-- Fixed windows for the in-memory proofs; the authority model, not the deadlines,
+-- is what these tests exercise.
+allocT0 : Time
+allocT0 = time (date 2026 Jul 1) 0 0 0
+
+allocT1 : Time
+allocT1 = time (date 2026 Jul 8) 0 0 0
+
+-- noContext is provided by Overwrite.Allocation (imported unqualified above).
+
+-- Exercise an interface choice on a MockAllocation cid, coercing to the interface.
+asAllocation : ContractId MockAllocation -> ContractId TA.Allocation
+asAllocation = toInterfaceContractId @TA.Allocation
+
+-- Spike 0.3: allocate, then withdraw; the holding comes back to the sender intact.
+testAllocationCycle : Script ()
+testAllocationCycle = do
+  issuer <- allocateParty "issuer"
+  vault <- allocateParty "vault"
+
+  -- Allocation with the vault as sender AND executor, receiver a placeholder buyer.
+  buyer <- allocateParty "buyer"
+  allocCid <- submitMulti [issuer, vault] [] do
+    createCmd MockAllocation with
+      issuer
+      sender = vault
+      receiver = buyer
+      executor = vault
+      instrument = "CBTC"
+      amount = 1.0
+      allocateBefore = allocT1
+      settleBefore = allocT1
+      requestedAt = allocT0
+
+  -- Withdraw is controlled by the sender (vault); the holding returns to it.
+  res <- submit vault do
+    exerciseCmd (asAllocation allocCid) (TA.Allocation_Withdraw with extraArgs = noContext)
+
+  [returnedIfc] <- pure res.senderHoldingCids
+  Some returned <- queryInterfaceContractId issuer returnedIfc
+  returned.owner === vault
+  returned.amount === 1.0
+  returned.instrumentId.id === "CBTC"
+
+-- Spike 0.2: atomic delivery-versus-payment. Both legs settle in ONE submission.
+-- Against the real interface this submission carries {executor, receiver} authority
+-- (here {vault, mmBuyer}), because the executor alone cannot exercise the choice.
+testAtomicDvp : Script ()
+testAtomicDvp = do
+  issuer <- allocateParty "issuer"
+  vault <- allocateParty "vault" -- operator custody + settlement executor
+  mmBuyer <- allocateParty "mmBuyer"
+
+  -- CBTC leg: vault -> buyer. sender = vault, receiver = mmBuyer.
+  cbtcAlloc <- submitMulti [issuer, vault] [] do
+    createCmd MockAllocation with
+      issuer
+      sender = vault
+      receiver = mmBuyer
+      executor = vault
+      instrument = "CBTC"
+      amount = 1.0
+      allocateBefore = allocT1
+      settleBefore = allocT1
+      requestedAt = allocT0
+
+  -- Cash leg: buyer -> vault. sender = mmBuyer, receiver = vault.
+  cashAlloc <- submitMulti [issuer, mmBuyer] [] do
+    createCmd MockAllocation with
+      issuer
+      sender = mmBuyer
+      receiver = vault
+      executor = vault
+      instrument = "mUSDC"
+      amount = 65000.0
+      allocateBefore = allocT1
+      settleBefore = allocT1
+      requestedAt = allocT0
+
+  -- ATOMIC: one submission settles BOTH legs. Neither can settle without the other;
+  -- there is no intermediate unsecured state. The two exercises compose applicatively.
+  (cbtcRes, cashRes) <- submitMulti [vault, mmBuyer] [] $
+    (,)
+      <$> exerciseCmd (asAllocation cbtcAlloc) (TA.Allocation_ExecuteTransfer with extraArgs = noContext)
+      <*> exerciseCmd (asAllocation cashAlloc) (TA.Allocation_ExecuteTransfer with extraArgs = noContext)
+
+  -- CBTC delivered to the buyer; cash delivered to the vault.
+  [cbtcIfc] <- pure cbtcRes.receiverHoldingCids
+  Some cbtcHolding <- queryInterfaceContractId issuer cbtcIfc
+  cbtcHolding.owner === mmBuyer
+  cbtcHolding.instrumentId.id === "CBTC"
+
+  [cashIfc] <- pure cashRes.receiverHoldingCids
+  Some cashHolding <- queryInterfaceContractId issuer cashIfc
+  cashHolding.owner === vault
+  cashHolding.instrumentId.id === "mUSDC"
+
+-- OTM path (SettleOTM): the option expires out of the money, the CBTC collateral is
+-- withdrawn, and it returns to the vault (the sender).
+testOtmSettlement : Script ()
+testOtmSettlement = do
+  issuer <- allocateParty "issuer"
+  vault <- allocateParty "vault"
+  buyer <- allocateParty "buyer"
+
+  cbtcAlloc <- submitMulti [issuer, vault] [] do
+    createCmd MockAllocation with
+      issuer
+      sender = vault
+      receiver = buyer
+      executor = vault
+      instrument = "CBTC"
+      amount = 1.0
+      allocateBefore = allocT1
+      settleBefore = allocT1
+      requestedAt = allocT0
+
+  res <- submit vault do
+    exerciseCmd (asAllocation cbtcAlloc) (TA.Allocation_Withdraw with extraArgs = noContext)
+
+  [returnedIfc] <- pure res.senderHoldingCids
+  Some returned <- queryInterfaceContractId issuer returnedIfc
+  returned.owner === vault
+  returned.amount === 1.0

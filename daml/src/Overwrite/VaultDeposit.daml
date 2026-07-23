@@ -1,0 +1,57 @@
+-- Position creation for the Vault deposit choices.
+--
+-- Split out of Overwrite.Vault to keep that module under the file-size limit, and for
+-- the same reason as Overwrite.VaultRecord: only pure helpers move, because under
+-- smart contract upgrades a template's module name is part of its identity. Choice
+-- BODIES may change across an upgrade; template locations may not.
+module Overwrite.VaultDeposit where
+
+import Overwrite.VaultPosition
+
+-- Add a deposit to the depositor's book for the current epoch, as ONE position.
+--
+-- The vault holds at most one VaultPosition per depositor per epoch. That is not a
+-- style preference: Vault.RecordEpoch asserts `unique depositors` over the positions
+-- it records (see Overwrite.VaultRecord), so a second position for the same depositor
+-- makes the epoch unrecordable, and the operator's scheduler then fails on every tick
+-- with the vault stuck forever. Creating a second position was exactly that bug.
+--
+-- So a depositor who already has a position for this epoch tops it up: the old
+-- position is archived and replaced by one carrying the combined principal, in the
+-- same transaction as the deposit. A first-time depositor passes None and gets a fresh
+-- position, which is the original behaviour.
+--
+-- The caller supplies the cid rather than the ledger finding it, because Daml cannot
+-- query the active contract set. That makes the cid untrusted input, so every field
+-- that could be used to attach a deposit to the wrong book is checked here.
+depositInto :
+  Party -> Party -> Int -> Text -> Decimal -> Optional (ContractId VaultPosition)
+  -> Update (ContractId VaultPosition)
+depositInto operator depositor epochNumber cashInstrument amount topUpPositionCid =
+  case topUpPositionCid of
+    None ->
+      create VaultPosition with
+        operator
+        depositor
+        principalCbtc = amount
+        epochNumber
+        withdrawQueued = False
+        cashInstrument
+    Some positionCid -> do
+      pos <- fetch positionCid
+      -- An unchecked cid here would let a deposit be credited to somebody else's
+      -- position, or to a stale epoch's, which is a theft primitive rather than a
+      -- bookkeeping slip.
+      assertMsg "deposit: top-up position belongs to another depositor"
+        (pos.depositor == depositor)
+      assertMsg "deposit: top-up position belongs to another vault"
+        (pos.operator == operator)
+      assertMsg "deposit: top-up position is from another epoch"
+        (pos.epochNumber == epochNumber)
+      -- A queued withdrawal means this principal is leaving at the epoch boundary.
+      -- Folding new money into it would send the deposit straight back out, so refuse
+      -- and let the depositor deposit again once the withdrawal has settled.
+      assertMsg "deposit: cannot top up a position queued for withdrawal"
+        (not pos.withdrawQueued)
+      archive positionCid
+      create pos with principalCbtc = pos.principalCbtc + amount

@@ -1,0 +1,188 @@
+-- Composed multi-depositor scenario fixtures.
+--
+-- These drive a whole epoch to a settled state (deposit, lock, write, pay premium,
+-- fan out receipts, settle) and hand back the resulting contract ids, so the test
+-- modules can assert against a realistic end state without rebuilding it each time.
+-- Split out of Overwrite.TestBase, which keeps the single-step primitives these are
+-- built from.
+module Overwrite.Fixtures where
+
+import DA.Time (hours, addRelTime)
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.CallOption
+import Overwrite.EpochSettlement
+import Overwrite.PremiumReceipt
+import Overwrite.PriceObservation
+import Overwrite.TestBase
+import Overwrite.Vault
+import Overwrite.VaultPosition
+
+-- Fixture for RecordEpoch tests: a locked, settled (OTM) epoch with two
+-- depositors, alice and bob, each holding a premium receipt. Bob has queued a
+-- withdrawal, so the fixture also proves RecordEpoch does not care which
+-- positions are queued to leave (that is RollPositions' job, Task 6b).
+data TwoDepositorFixture = TwoDepositorFixture
+  with
+    vaultCid : ContractId Vault
+    alicePosition : ContractId VaultPosition
+    bobPosition : ContractId VaultPosition
+    aliceReceipt : ContractId PremiumReceipt
+    bobReceipt : ContractId PremiumReceipt
+    bob : Party
+    expiry : Time
+    epochNumber : Int
+    totalPrincipal : Decimal
+    totalPremium : Decimal
+    alicePrincipal : Decimal
+    epochSettlementCid : ContractId EpochSettlement
+    recoveredPoolCid : ContractId Holding  -- CBTC collateral SettleOTM returned to the vault
+
+twoDepositorSettledEpoch : Parties -> Script TwoDepositorFixture
+twoDepositorSettledEpoch p = do
+  bob <- allocateParty "bob"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault0a, alicePosition) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  bobCbtc <- makeHolding p.cbtcIssuer bob "CBTC" 2.0
+  (vault0b, bobPositionRaw) <- submitMulti [p.operator, bob] [] $
+    exerciseCmd vault0a (Deposit with depositor = bob; cbtcCid = bobCbtc; topUpPositionCid = None)
+
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0b pool
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 300.0; notionalCbtc = 3.0; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 300.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  vaultUsdc <- findHolding p.operator "mUSDC" p.operator
+  (aliceChunk, bobChunk) <- submit p.operator $
+    exerciseCmd vaultUsdc (Split with splitAmount = 100.0)
+  (_, aliceReceipt) <- submit p.operator $
+    exerciseCmd alicePosition (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = aliceChunk; transferRef = "e1-alice")
+  (_, bobReceipt) <- submit p.operator $
+    exerciseCmd bobPositionRaw (PayoutPremium with
+      premiumUsdc = 200.0; usdcCid = bobChunk; transferRef = "e1-bob")
+
+  bobPosition <- submit bob $ exerciseCmd bobPositionRaw QueueWithdraw
+
+  passTime (hours 2)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  (withdrawRes, settlementCid) <- submit p.operator $
+    exerciseCmd optionActive (SettleOTM with obsCid = obs; cbtcContext = noContext)
+  [recoveredIfc] <- pure withdrawRes.senderHoldingCids
+  let recoveredPoolCid = asHolding recoveredIfc
+
+  pure TwoDepositorFixture with
+    vaultCid = vault1
+    alicePosition
+    bobPosition
+    aliceReceipt
+    bobReceipt
+    bob
+    expiry
+    epochNumber = 1
+    totalPrincipal = 3.0
+    totalPremium = 300.0
+    alicePrincipal = 1.0
+    epochSettlementCid = settlementCid
+    recoveredPoolCid
+
+-- Fixture for RollPositions ITM tests: a locked, settled (ITM) epoch with two
+-- depositors, alice and bob. The call finished in the money, so the vault holds
+-- strike cash instead of CBTC: `strikeProceedsCid` is the operator-owned cash
+-- holding SettleITM delivered, and `totalProceeds` its amount.
+data TwoDepositorItmFixture = TwoDepositorItmFixture
+  with
+    vaultCid : ContractId Vault
+    alicePosition : ContractId VaultPosition
+    bobPosition : ContractId VaultPosition
+    aliceReceipt : ContractId PremiumReceipt
+    bobReceipt : ContractId PremiumReceipt
+    bob : Party
+    expiry : Time
+    epochNumber : Int
+    totalPrincipal : Decimal
+    totalPremium : Decimal
+    alicePrincipal : Decimal
+    epochSettlementCid : ContractId EpochSettlement
+    strikeProceedsCid : ContractId Holding  -- operator-owned strike cash SettleITM delivered
+    totalProceeds : Decimal
+
+twoDepositorItmSettledEpoch : Parties -> Script TwoDepositorItmFixture
+twoDepositorItmSettledEpoch p = do
+  bob <- allocateParty "bob"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault0a, alicePosition) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  bobCbtc <- makeHolding p.cbtcIssuer bob "CBTC" 2.0
+  (vault0b, bobPositionRaw) <- submitMulti [p.operator, bob] [] $
+    exerciseCmd vault0a (Deposit with depositor = bob; cbtcCid = bobCbtc; topUpPositionCid = None)
+
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0b pool
+  -- strike = spotAtOpen * (1 + strikePct) = 60000 * 1.1 = 66000
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 300.0; notionalCbtc = 3.0; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 300.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  vaultUsdc <- findHolding p.operator "mUSDC" p.operator
+  (aliceChunk, bobChunk) <- submit p.operator $
+    exerciseCmd vaultUsdc (Split with splitAmount = 100.0)
+  (_, aliceReceipt) <- submit p.operator $
+    exerciseCmd alicePosition (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = aliceChunk; transferRef = "e1-alice")
+  (_, bobReceipt) <- submit p.operator $
+    exerciseCmd bobPositionRaw (PayoutPremium with
+      premiumUsdc = 200.0; usdcCid = bobChunk; transferRef = "e1-bob")
+
+  bobPosition <- submit bob $ exerciseCmd bobPositionRaw QueueWithdraw
+
+  -- buyer allocates the strike payment (66000 * 3.0 = 198000 mUSDC), executor = operator
+  buyerCash <- makeHolding p.operator p.mmBuyer "mUSDC" 198000.0
+  cashAlloc <- allocateCash p buyerCash
+
+  passTime (hours 2)
+  -- ITM: price (70000) > strike (66000)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 70000.0; source = "test"; observedAt = expiry; isDemo = True
+  (_, cashRes, settlementCid) <- submit p.operator $
+    exerciseCmd optionActive (SettleITM with obsCid = obs; cashAllocationCid = cashAlloc; cbtcContext = noContext; cashContext = noContext)
+  [strikeProceedsIfc] <- pure cashRes.receiverHoldingCids
+  let strikeProceedsCid = asHolding strikeProceedsIfc
+
+  pure TwoDepositorItmFixture with
+    vaultCid = vault1
+    alicePosition
+    bobPosition
+    aliceReceipt
+    bobReceipt
+    bob
+    expiry
+    epochNumber = 1
+    totalPrincipal = 3.0
+    totalPremium = 300.0
+    alicePrincipal = 1.0
+    epochSettlementCid = settlementCid
+    strikeProceedsCid
+    totalProceeds = 198000.0

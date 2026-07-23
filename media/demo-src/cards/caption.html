@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  /* One lower-third caption pill, rendered on a transparent background and
+     composited over the UI footage by ffmpeg's overlay filter. Same tokens as
+     stage.html so the caption reads as part of the same product. */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 104px; background: transparent; overflow: hidden; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #pill {
+    display: flex; align-items: center; gap: 18px;
+    max-width: 1560px;
+    padding: 20px 40px;
+    border-radius: 14px;
+    background: rgba(10, 12, 17, 0.86);
+    border: 1px solid #232936;
+    color: #eef1f6;
+    font-size: 38px;
+    font-weight: 600;
+    letter-spacing: -0.2px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  /* The app's own brand mark (an orange dot beside the wordmark), reused here so the
+     caption carries the brand without an accent bar down one edge. */
+  #dot { width: 14px; height: 14px; flex: none; border-radius: 50%; background: #f7931a; }
+  #text { overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+  <div id="pill"><span id="dot"></span><span id="text"></span></div>
+<script>
+  window.__caption = (text) => {
+    document.getElementById('text').textContent = text
+    return true
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,179 @@
+// ESLint flat config - trimmed companion to templates/biome.json.
+// Biome handles fast syntactic rules + formatting (see biome.json).
+// ESLint keeps ONLY the rules Biome can't do: type-aware checks and
+// plugin-specific checks (import resolution, sonarjs complexity, security).
+//
+// Rationale and tier-by-tier breakdown: guides/lint-rules-for-ai.md.
+//
+// Assumes: ESLint >= 9, TypeScript, type-aware linting via projectService.
+// Install:
+//   npm i -D eslint typescript-eslint eslint-plugin-import \
+//     eslint-plugin-sonarjs eslint-plugin-security eslint-plugin-eslint-comments
+
+import comments from 'eslint-plugin-eslint-comments'
+import importPlugin from 'eslint-plugin-import'
+import security from 'eslint-plugin-security'
+import sonarjs from 'eslint-plugin-sonarjs'
+import tseslint from 'typescript-eslint'
+
+export default tseslint.config(
+  {
+    ignores: [
+      'dist/**',
+      'build/**',
+      'coverage/**',
+      'node_modules/**',
+      '*.config.*',
+      'web/**',
+      // Documentation and its one-off tooling (e.g. the submission-deck HTML->PDF
+      // build script) are not part of the typed app; recommendedTypeChecked has no
+      // tsconfig for them and would crash on a bare .mjs. Same rationale as web/**.
+      'docs/**',
+      // The demo-video pipeline, for exactly the same reason: standalone .mjs build
+      // scripts with no tsconfig behind them. Excluded from biome too (biome.json).
+      'media/**',
+      // Agent worktrees are checkouts of this same repo nested inside it. They are
+      // git-excluded, but eslint does not read git excludes, so without this it walks
+      // into the copy and dies on the nested eslint.config.mjs it finds there: the
+      // typed-linting rules have no parserOptions for a file outside the tsconfig root.
+      // Symptom is a stack trace naming a path under .claude/worktrees, not a lint error.
+      '.claude/worktrees/**',
+    ],
+  },
+
+  ...tseslint.configs.recommendedTypeChecked,
+
+  {
+    files: ['**/*.{ts,tsx}'],
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+    },
+    settings: {
+      'import/resolver': {
+        typescript: {
+          alwaysTryTypes: true,
+          project: ['backend/tsconfig.json', 'scripts/tsconfig.json'],
+        },
+      },
+    },
+    plugins: {
+      import: importPlugin,
+      sonarjs,
+      security,
+      'eslint-comments': comments,
+    },
+    rules: {
+      // ── Tier 1: Type-aware correctness (Biome cannot do these) ─────────────
+      // Async bugs - the highest-value AI guardrails.
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/require-await': 'error',
+      '@typescript-eslint/await-thenable': 'error',
+      '@typescript-eslint/return-await': ['error', 'always'],
+
+      // Type-unsafe escape hatches.
+      '@typescript-eslint/no-unsafe-assignment': 'error',
+      '@typescript-eslint/no-unsafe-call': 'error',
+      '@typescript-eslint/no-unsafe-member-access': 'error',
+      '@typescript-eslint/no-unsafe-return': 'error',
+      '@typescript-eslint/no-unsafe-argument': 'error',
+      '@typescript-eslint/strict-boolean-expressions': [
+        'error',
+        { allowNullableObject: true, allowNullableBoolean: true },
+      ],
+      '@typescript-eslint/switch-exhaustiveness-check': 'error',
+      '@typescript-eslint/no-unnecessary-condition': 'error',
+      '@typescript-eslint/only-throw-error': 'error',
+      '@typescript-eslint/prefer-nullish-coalescing': 'error',
+      '@typescript-eslint/prefer-readonly': 'error',
+
+      // ── Tier 2: Imports (catches hallucinated modules - Biome can't resolve) ─
+      'import/no-unresolved': ['error', { ignore: ['^bun:'] }],
+      'import/no-cycle': ['error', { maxDepth: 10 }],
+      'import/no-self-import': 'error',
+      'import/no-extraneous-dependencies': 'error',
+      'import/first': 'error',
+      'import/newline-after-import': 'error',
+      // Deep relative paths - style.noRestrictedImports in Biome covers package names,
+      // but pattern matching on relative paths is ESLint-only.
+      'no-restricted-imports': ['error', { patterns: ['../../../*'] }],
+
+      // ── Tier 3: Agent-specific traps (plugin-only) ─────────────────────────
+      'no-warning-comments': ['warn', { terms: ['fixme', 'xxx', 'hack'], location: 'anywhere' }],
+      'no-restricted-properties': [
+        'error',
+        {
+          object: 'process',
+          property: 'env',
+          message: 'Inject config at the boundary; do not read process.env deep in modules.',
+        },
+      ],
+      'eslint-comments/require-description': ['error', { ignore: [] }],
+      'eslint-comments/no-unlimited-disable': 'error',
+      'eslint-comments/no-unused-disable': 'error',
+
+      // Discriminated-union Result pattern - see guides/discriminated-union-results.md
+      // and guides/error-id-registry.md. Raw `throw new Error(...)` short-circuits
+      // both: it hides failure modes from the signature and skips the error ID.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'ThrowStatement > NewExpression[callee.name="Error"]',
+          message:
+            'Return Result<T, AppError> instead of throwing raw Error. Use AppError(ErrorIds.X, ...) for programmer errors. See guides/error-id-registry.md.',
+        },
+      ],
+
+      // ── Tier 4: Complexity (sonarjs - Biome has noExcessiveCognitiveComplexity
+      //    but sonarjs's heuristics are more mature) ─────────────────────────
+      'sonarjs/cognitive-complexity': ['error', 15],
+      'sonarjs/no-duplicate-string': ['error', { threshold: 5 }],
+      'sonarjs/no-identical-functions': 'error',
+      'sonarjs/no-collapsible-if': 'error',
+      'sonarjs/prefer-immediate-return': 'error',
+      complexity: ['warn', 15],
+      'max-depth': ['warn', 4],
+      'max-nested-callbacks': ['warn', 3],
+      'max-params': ['warn', 4],
+
+      // ── Tier 5: Security (Biome only has noGlobalEval) ─────────────────────
+      'security/detect-object-injection': 'warn',
+      'security/detect-non-literal-regexp': 'warn',
+      'security/detect-unsafe-regex': 'error',
+      'security/detect-eval-with-expression': 'error',
+      'security/detect-child-process': 'warn',
+      'no-implied-eval': 'error',
+      'no-new-func': 'error',
+
+      // ── Turn OFF rules Biome now owns, so they don't double-fire ───────────
+      // (typescript-eslint recommendedTypeChecked enables some of these.)
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-non-null-assertion': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
+    },
+  },
+
+  {
+    files: ['**/*.{test,spec}.{ts,tsx}', 'tests/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      'sonarjs/no-duplicate-string': 'off',
+      'max-nested-callbacks': 'off',
+      'no-restricted-properties': 'off',
+      'no-restricted-syntax': 'off',
+    },
+  },
+
+  // Operational CLI scripts: a different context than library code. They print to
+  // the console, read argv/env directly, and exit rather than returning Results.
+  {
+    files: ['scripts/**/*.ts'],
+    rules: {
+      'no-restricted-properties': 'off',
+      'no-restricted-syntax': 'off',
+      'sonarjs/no-duplicate-string': 'off',
+      'security/detect-object-injection': 'off',
+    },
+  },
+)

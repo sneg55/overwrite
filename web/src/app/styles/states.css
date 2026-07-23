@@ -1,0 +1,123 @@
+/* The ways a screen can show something other than settled data: the three "nothing
+   to show" states, and the loading skeletons.
+
+   Keeping empty and error visually distinct is a correctness concern, not a style
+   one. This product's central claim is that an empty view is the ledger's own
+   answer. If a backend outage rendered the same muted text as a privacy-scoped
+   empty ACS, the UI would assert a fact it never observed. */
+
+/* 1. Empty: the ledger answered, and the answer was nothing. A real fact. */
+.empty-state {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+
+.empty-title {
+  font-weight: 550;
+  color: var(--text-1);
+}
+
+.empty-body {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  max-width: 46ch;
+  justify-self: center;
+}
+
+/* 2. Error: we never got an answer. Must never look like an empty state. */
+.error-state {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--danger-bg);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--danger-line);
+}
+
+.error-title {
+  font-weight: 550;
+  color: var(--danger);
+}
+
+.error-body {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.error-detail {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* 3. Not visible: the row exists and is not this party's to read. Distinct from
+   empty (the ledger answered nothing) and from error (we got no answer). Muted to
+   match .card-hint, because it is a statement about scope rather than a problem. */
+.not-visible {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* 4. Note: a standing disclaimer. Not a state at all. */
+.note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.note-inline {
+  margin-top: var(--space-4);
+}
+
+/* ---- Skeletons ---- */
+
+/* Sized to the settled layout, so swapping a skeleton for real data does not
+   reflow the page. The skeletons are aria-hidden; a live region announces instead. */
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
+  background-size: 400% 100%;
+  border-radius: var(--radius-sm);
+  animation: skeleton-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep {
+  from {
+    background-position: 100% 50%;
+  }
+  to {
+    background-position: 0 50%;
+  }
+}
+
+/* --duration only zeroes transitions. Keyframes need their own guard. */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}
+
+.skeleton-line {
+  height: 1em;
+}
+
+.skeleton-row {
+  height: 2.75rem;
+  margin-bottom: var(--space-1);
+}
+
+.skeleton-display {
+  height: var(--text-display);
+  width: 60%;
+}
+
+.skeleton-stack {
+  display: grid;
+  gap: var(--space-3);
+}

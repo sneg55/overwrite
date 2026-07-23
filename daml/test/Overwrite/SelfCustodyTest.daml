@@ -1,0 +1,62 @@
+-- The self-custody propose/accept path (Vault.OfferDeposit / DepositInvite.
+-- AcceptDeposit) had zero coverage. Split into its own module (rather than
+-- appended to LifecycleTest) so LifecycleTest stays under the 300-line
+-- file-size hook.
+module Overwrite.SelfCustodyTest where
+
+import DA.Time (hours, addRelTime)
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.Vault
+import Overwrite.TestBase
+
+-- The self-custody propose/accept path has zero coverage today. Exercise it end to end.
+testSelfCustodyDepositPath : Script ()
+testSelfCustodyDepositPath = do
+  p <- setupParties
+  bob <- allocateParty "bob"
+  now <- getTime
+  vaultCid <- newVault p
+
+  inviteCid <- submit p.operator do
+    exerciseCmd vaultCid OfferDeposit with
+      depositor = p.alice
+      minAmount = 0.1
+      expiresAt = addRelTime now (hours 1)
+
+  aliceCbtc <- submit p.operator do
+    createCmd Holding with
+      issuer = p.operator; owner = p.alice; instrument = "CBTC"; amount = 0.5
+
+  -- Alice alone authorizes and controls AcceptDeposit (authority for the nested
+  -- Vault.Deposit flows from DepositInvite's operator signatory, per the choice's
+  -- doc comment), but she is not a Vault stakeholder (signatory operator only, no
+  -- depositor observer), so she cannot even see it to build the transaction. A
+  -- real submission needs readAs = [operator] for visibility; actAs stays alice-only.
+  (_, positionCid) <- submitMulti [p.alice] [p.operator] do
+    exerciseCmd inviteCid AcceptDeposit with vaultCid; cbtcCid = aliceCbtc; topUpPositionCid = None
+
+  pos <- queryContractId p.alice positionCid
+  case pos of
+    None -> abort "alice cannot see her own position"
+    Some position -> assertMsg "principal recorded" (position.principalCbtc == 0.5)
+
+  -- Bob, a non-stakeholder, sees nothing.
+  bobView <- queryContractId bob positionCid
+  assertMsg "bob must not see alice's position" (bobView == None)
+
+-- An invite below its own minimum is rejected.
+testAcceptDepositBelowInviteMinimumRejected : Script ()
+testAcceptDepositBelowInviteMinimumRejected = do
+  p <- setupParties
+  now <- getTime
+  vaultCid <- newVault p
+  inviteCid <- submit p.operator do
+    exerciseCmd vaultCid OfferDeposit with
+      depositor = p.alice; minAmount = 0.5; expiresAt = addRelTime now (hours 1)
+  dust <- submit p.operator do
+    createCmd Holding with
+      issuer = p.operator; owner = p.alice; instrument = "CBTC"; amount = 0.2
+  submitMustFail p.alice do
+    exerciseCmd inviteCid AcceptDeposit with vaultCid; cbtcCid = dust; topUpPositionCid = None

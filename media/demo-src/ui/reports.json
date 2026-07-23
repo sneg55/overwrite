@@ -1,0 +1,30 @@
+{
+  "$schema": "../node_modules/testreel/recording-definition.schema.json",
+  "url": "http://localhost:3000/app/reports",
+  "viewport": { "width": 1280, "height": 720 },
+  "colorScheme": "dark",
+  "outputFormat": "mp4",
+  "cookies": [
+    { "name": "overwrite-party", "value": "operator", "domain": "localhost", "path": "/" }
+  ],
+  "cursor": {
+    "enabled": true,
+    "size": 26,
+    "color": "#f7931a",
+    "rippleColor": "#ffb454",
+    "rippleSize": 44,
+    "idleHide": false,
+    "transitionMs": 650
+  },
+  "steps": [
+    { "action": "wait", "ms": 3600 },
+    { "action": "scroll", "y": 200 },
+    { "action": "wait", "ms": 3400 },
+    { "action": "scroll", "y": 200 },
+    { "action": "wait", "ms": 3400 },
+    { "action": "scroll", "y": 240 },
+    { "action": "wait", "ms": 4200 },
+    { "action": "scroll", "y": -300 },
+    { "action": "wait", "ms": 2600 }
+  ]
+}

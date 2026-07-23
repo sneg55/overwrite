@@ -1,0 +1,293 @@
+-- Shared allocation surface for Overwrite settlement (in-memory model).
+--
+-- Mirrors the CIP-56 allocation choice surface (Allocate / ExecuteTransfer /
+-- Withdraw) so both settlement legs are handled symmetrically:
+--   * CBTC leg -> in production, the DA Registry AllocationFactory allocation.
+--   * cash leg -> demo-only mock-USDCx (same surface, so SettleITM composes both).
+--
+-- The point this model proves (spike 0.2): once a holding is allocated, the named
+-- `executor` holds unilateral authority to settle or withdraw that leg. That
+-- pre-granted authority is what lets the executor settle BOTH legs in ONE
+-- transaction (atomic DvP) without the counterparty co-signing at settlement time.
+-- See Overwrite.AllocationTest.
+--
+-- Production sets allocateBefore/settleBefore = expiry + buffer via the real
+-- registry. Those time windows are a devnet concern and are omitted from this
+-- in-memory authority proof.
+module Overwrite.Allocation where
+
+import DA.Foldable (mapA_)
+import DA.Time (RelTime, addRelTime)
+
+import qualified Splice.Api.Token.HoldingV1 as TH
+import qualified Splice.Api.Token.AllocationV1 as TA
+import qualified Splice.Api.Token.AllocationInstructionV1 as AI
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+
+-- Empty choice context for the demo/local settlement path. Production settlement
+-- attaches the registry's disclosed choice context here (Task 10); MockAllocation
+-- ignores it, so the local cycle passes this.
+noContext : ExtraArgs
+noContext = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+
+-- Bound a caller-supplied settlement window.
+--
+-- The registry fetches its off-ledger choice context for the EXACT choice arguments
+-- a submission will carry, so the window cannot be picked inside Daml with getTime:
+-- the caller would have no way to know it in advance. It arrives as a choice
+-- argument and is validated here instead. This rejects a postdated request, an
+-- allocate window that has already closed, and a settlement window tighter than the
+-- vault's configured buffer. It deliberately does NOT bound how old `requestedAt`
+-- may be: a stale context is the registry's own check, and duplicating it here would
+-- add a second freshness rule that could disagree with the registry's.
+--
+-- Lives beside collateralSpec so the window a spec carries is validated in the same
+-- place the spec is built.
+assertValidAllocationWindow : RelTime -> Time -> Time -> Time -> Update ()
+assertValidAllocationWindow settleBuffer requestedAt allocateBefore settleBefore = do
+  now <- getTime
+  assertMsg "allocation window: requestedAt is in the future" (requestedAt <= now)
+  assertMsg "allocation window: allocateBefore has already passed" (allocateBefore > now)
+  assertMsg "allocation window: settleBefore is below the configured buffer"
+    (settleBefore >= addRelTime allocateBefore settleBuffer)
+
+-- Build the collateral AllocationSpecification handed to AllocationFactory_Allocate.
+-- One transfer leg: `sender` locks `amount` of instrument `instrument` (admin =
+-- `issuer`) for `receiver` (the ITM destination), with `executor` settling. The three
+-- times are the demo settlement window. Lives here with the allocation surface so the
+-- record shape stays in one place; LockCollateral fills sender/receiver/executor.
+collateralSpec :
+  Party -> Party -> Party -> Party -> Text -> Decimal -> Time -> Time -> Time
+  -> TA.AllocationSpecification
+collateralSpec issuer sender receiver executor instrument amount requestedAt allocateBefore settleBefore =
+  TA.AllocationSpecification with
+    settlement = TA.SettlementInfo with
+      executor
+      settlementRef = TA.Reference with id = "overwrite-collateral", cid = None
+      requestedAt
+      allocateBefore
+      settleBefore
+      meta = emptyMetadata
+    transferLegId = "collateral"
+    transferLeg = TA.TransferLeg with
+      sender
+      receiver
+      amount
+      instrumentId = TH.InstrumentId with admin = issuer, id = instrument
+      meta = emptyMetadata
+
+-- A fungible holding of some instrument. Used for both the CBTC leg
+-- (instrument = "CBTC") and the demo cash leg (instrument = "mUSDC").
+--
+-- Implements the CIP-56 registry Holding interface (TH.Holding), so a real
+-- registry holding and this demo token are the same interface type to the rest of
+-- the package. The instrument admin in the interface view is the holding's issuer.
+template Holding
+  with
+    issuer : Party
+    owner : Party
+    instrument : Text
+    amount : Decimal
+  where
+    signatory issuer
+    observer owner
+    ensure amount > 0.0
+
+    interface instance TH.Holding for Holding where
+      view = TH.HoldingView with
+        owner
+        instrumentId = TH.InstrumentId with admin = issuer, id = instrument
+        amount
+        lock = None
+        meta = emptyMetadata
+
+    -- Lock this holding into a settlement leg. LOCAL/demo producer of a registry
+    -- allocation-interface contract: creates a labeled MockAllocation (which implements
+    -- the real TA.Allocation) and returns it as the interface cid. The production path is
+    -- the registry's AllocationFactory_Allocate (Task 10). Runs with owner + issuer
+    -- authority (issuer is the Holding signatory), which is exactly what creating a
+    -- MockAllocation (signatory issuer, sender) requires. The receiver is fixed here,
+    -- because the real Allocation_ExecuteTransfer bakes the receiver into the leg.
+    choice Allocate : ContractId TA.Allocation
+      with
+        executor : Party
+        receiver : Party
+        allocateBefore : Time
+        settleBefore : Time
+        requestedAt : Time
+      controller owner
+      do
+        allocCid <- create MockAllocation with
+          issuer
+          sender = owner
+          receiver
+          executor
+          instrument
+          amount
+          allocateBefore
+          settleBefore
+          requestedAt
+        pure (toInterfaceContractId @TA.Allocation allocCid)
+
+    -- Plain ownership transfer (mirrors a CIP-56 holding transfer). Used for
+    -- deposits (depositor -> operator) and premium payouts (operator -> depositor).
+    choice Transfer : ContractId Holding
+      with
+        newOwner : Party
+      controller owner
+      do
+        create this with owner = newOwner
+
+    -- Consolidate two same-instrument holdings of the same owner into one
+    -- (the 10-UTXO soft-limit consolidation pattern). Archives `otherCid`.
+    choice Merge : ContractId Holding
+      with
+        otherCid : ContractId Holding
+      controller owner
+      do
+        other <- fetch otherCid
+        assertMsg "merge: same issuer" (other.issuer == issuer)
+        assertMsg "merge: same owner" (other.owner == owner)
+        assertMsg "merge: same instrument" (other.instrument == instrument)
+        archive otherCid
+        create this with amount = amount + other.amount
+
+    -- Split off `splitAmount` into a new holding, leaving the remainder. Used to
+    -- carve exact per-depositor premium chunks out of the pooled premium.
+    choice Split : (ContractId Holding, ContractId Holding)
+      with
+        splitAmount : Decimal
+      controller owner
+      do
+        assertMsg "split: amount out of range" (splitAmount > 0.0 && splitAmount < amount)
+        first <- create this with amount = splitAmount
+        remainder <- create this with amount = amount - splitAmount
+        pure (first, remainder)
+
+-- In-memory stand-in for the registry's own Allocation contract, used ONLY by the
+-- Daml Script suite to prove the real CIP-56 allocation interface's authority and
+-- composition model (spike 0.2). Production never creates this: collateral is the
+-- registry's Allocation returned by AllocationFactory_Allocate. This is a labeled
+-- demo stand-in that implements the foreign interface, NOT a custom lock.
+--
+-- The real interface fixes the receiver in transferLeg at allocation time (there is
+-- no receiver choice argument), and controls Allocation_ExecuteTransfer with
+-- [executor, sender, receiver] (not executor alone, as the local mirror above does).
+-- So settling needs the receiver's co-authority, which in the product the CallOption
+-- coordination contract carries (signatory operator, mmBuyer). See
+-- docs/spikes/0.2-dvp-transcript.md.
+template MockAllocation
+  with
+    issuer : Party
+    sender : Party            -- transferLeg.sender: owner of the locked holding
+    receiver : Party          -- transferLeg.receiver: the ITM destination
+    executor : Party          -- settlement executor
+    instrument : Text
+    amount : Decimal
+    allocateBefore : Time
+    settleBefore : Time
+    requestedAt : Time
+  where
+    signatory issuer, sender
+    observer executor, receiver
+    ensure amount > 0.0
+
+    interface instance TA.Allocation for MockAllocation where
+      view = TA.AllocationView with
+        allocation = TA.AllocationSpecification with
+          settlement = TA.SettlementInfo with
+            executor
+            settlementRef = TA.Reference with id = "overwrite-settlement", cid = None
+            requestedAt
+            allocateBefore
+            settleBefore
+            meta = emptyMetadata
+          transferLegId = "collateral"
+          transferLeg = TA.TransferLeg with
+            sender
+            receiver
+            amount
+            instrumentId = TH.InstrumentId with admin = issuer, id = instrument
+            meta = emptyMetadata
+        holdingCids = []
+        meta = emptyMetadata
+
+      -- Deliver the leg to the receiver (ITM settlement). Creates a demo Holding for
+      -- the receiver and returns it as a registry Holding-interface cid.
+      allocation_executeTransferImpl _self _arg = do
+        delivered <- create Holding with issuer, owner = receiver, instrument, amount
+        pure TA.Allocation_ExecuteTransferResult with
+          senderHoldingCids = []
+          receiverHoldingCids = [toInterfaceContractId @TH.Holding delivered]
+          meta = emptyMetadata
+
+      -- Unwind the leg back to the sender (OTM settlement, or an aborted settlement).
+      allocation_withdrawImpl _self _arg = do
+        returned <- create Holding with issuer, owner = sender, instrument, amount
+        pure TA.Allocation_WithdrawResult with
+          senderHoldingCids = [toInterfaceContractId @TH.Holding returned]
+          meta = emptyMetadata
+
+      allocation_cancelImpl _self _arg = do
+        returned <- create Holding with issuer, owner = sender, instrument, amount
+        pure TA.Allocation_CancelResult with
+          senderHoldingCids = [toInterfaceContractId @TH.Holding returned]
+          meta = emptyMetadata
+
+-- LABELED demo stand-in for the registry's AllocationFactory
+-- (Splice.Api.Token.AllocationInstructionV1.AllocationFactory). On devnet the CBTC
+-- registry publishes its own factory contract implementing this same interface;
+-- locally we run this mock so LockCollateral has ONE code path against the real
+-- interface. This is NOT a custom lock: AllocationFactory_Allocate produces a real
+-- interface Allocation (a MockAllocation, which implements TA.Allocation).
+--
+-- Authority. Signatory is admin. In the demo admin == the CBTC issuer, so the factory
+-- carries issuer authority. The interface's AllocationFactory_Allocate is controlled
+-- by the transfer leg's sender, so the choice body runs with {issuer, sender}
+-- authority: exactly what creating the collateral MockAllocation (signatory issuer,
+-- sender) and archiving the input pool Holding (signatory issuer) both require.
+--
+-- The local factory settles SYNCHRONOUSLY: it always returns Completed. A live
+-- registry may return Pending (a two-step allocation instruction) or Failed;
+-- LockCollateral surfaces those rather than the factory pretending to complete.
+--
+-- `user` is a demo-visibility shim: the party allowed to see and call the factory
+-- (locally the vault operator). On devnet the registry's AllocationFactory is a PUBLIC
+-- contract reached through disclosed contracts, not a per-user observer; the observer
+-- here just stands in for that disclosure locally and leaks no depositor data.
+template MockAllocationFactory
+  with
+    admin : Party
+    user : Party
+  where
+    signatory admin
+    observer user
+
+    interface instance AI.AllocationFactory for MockAllocationFactory where
+      view = AI.AllocationFactoryView with admin, meta = emptyMetadata
+
+      allocationFactory_allocateImpl _self arg = do
+        let spec = arg.allocation
+        let leg = spec.transferLeg
+        let settlement = spec.settlement
+        allocCid <- create MockAllocation with
+          issuer = leg.instrumentId.admin
+          sender = leg.sender
+          receiver = leg.receiver
+          executor = settlement.executor
+          instrument = leg.instrumentId.id
+          amount = leg.amount
+          allocateBefore = settlement.allocateBefore
+          settleBefore = settlement.settleBefore
+          requestedAt = settlement.requestedAt
+        -- Consume the locked pool holdings into the allocation. The input holdings are
+        -- concrete demo Holdings, so coerce the interface cids back to archive them.
+        mapA_ (\hcid -> archive (fromInterfaceContractId @Holding hcid)) arg.inputHoldingCids
+        pure AI.AllocationInstructionResult with
+          output = AI.AllocationInstructionResult_Completed with
+            allocationCid = toInterfaceContractId @TA.Allocation allocCid
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      allocationFactory_publicFetchImpl _self _arg =
+        pure AI.AllocationFactoryView with admin, meta = emptyMetadata

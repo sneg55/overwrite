@@ -1,0 +1,363 @@
+-- The operator's control contract, one per vault. A mutable state machine:
+-- state-advancing choices archive and recreate it, so the Vault cid changes every
+-- epoch (the backend queries by template, never caches the cid). CBTC is pooled in
+-- operator custody; deposits create pro-rata VaultPosition claims.
+--
+-- DepositInvite lives in this module rather than its own: AcceptDeposit must
+-- exercise Vault.Deposit (so the self-custody path also advances the pooled
+-- total) while Vault.OfferDeposit creates a DepositInvite. Two modules importing
+-- each other isn't expressible in Daml, so both templates share this one.
+module Overwrite.Vault where
+
+import DA.Time (RelTime, seconds)
+
+import Overwrite.Allocation
+import Overwrite.CallOption
+import Overwrite.EpochReport
+import Overwrite.EpochSettlement
+import Overwrite.PremiumReceipt
+import Overwrite.Rollover
+import Overwrite.Types
+import Overwrite.VaultDeposit
+import Overwrite.VaultRecord
+import Overwrite.VaultPosition
+import qualified Splice.Api.Token.AllocationV1 as TA
+import qualified Splice.Api.Token.AllocationInstructionV1 as AI
+import qualified Splice.Api.Token.HoldingV1 as TH
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+template Vault
+  with
+    operator : Party
+    oracleParty : Party
+    epochNumber : Int
+    windowState : WindowState
+    strikePct : Decimal        -- demo rule: strike = spotAtOpen * (1 + strikePct)
+    premiumSplitPct : Decimal
+    cashInstrument : Text      -- e.g. "mUSDC"
+    maxObservationAge : RelTime
+    settleBufferSeconds : RelTime  -- settlement window slack added past allocateBefore
+    totalPooledCbtc : Decimal  -- running sum of principalCbtc across this epoch's positions
+    minDepositCbtc : Decimal   -- floor, so dust deposits cannot fragment the pool
+  where
+    signatory operator
+    ensure strikePct > 0.0 && minDepositCbtc > 0.0 && totalPooledCbtc >= 0.0
+      && settleBufferSeconds > seconds 0
+
+    -- Custodial deposit: depositor's CBTC moves into operator custody and a
+    -- VaultPosition is created, in one command. Consuming, because the vault's
+    -- running pooled total advances with it. Authority: operator + depositor
+    -- (the backend holds both keys in custodial mode).
+    choice Deposit : (ContractId Vault, ContractId VaultPosition)
+      with
+        depositor : Party
+        cbtcCid : ContractId Holding
+        -- The depositor's existing position for THIS epoch, when they have one, to be
+        -- topped up rather than joined by a second position. Optional because this
+        -- field was appended to a published choice (see daml.yaml `upgrades:`), and
+        -- because a first-time depositor genuinely has nothing to top up.
+        topUpPositionCid : Optional (ContractId VaultPosition)
+      controller operator, depositor
+      do
+        assertMsg "deposit: window not open" (windowState == Open)
+        h <- fetch cbtcCid
+        assertMsg "deposit: holding owned by depositor" (h.owner == depositor)
+        assertMsg "deposit: wrong instrument" (h.instrument == "CBTC")
+        assertMsg "deposit: below minimum" (h.amount >= minDepositCbtc)
+        _ <- exercise cbtcCid Transfer with newOwner = operator
+        positionCid <- depositInto operator depositor epochNumber cashInstrument
+          h.amount topUpPositionCid
+        vaultCid <- create this with totalPooledCbtc = totalPooledCbtc + h.amount
+        pure (vaultCid, positionCid)
+
+    -- Self-custody deposit path: offer a DepositInvite the depositor accepts.
+    nonconsuming choice OfferDeposit : ContractId DepositInvite
+      with
+        depositor : Party
+        minAmount : Decimal
+        expiresAt : Time
+      controller operator
+      do
+        create DepositInvite with
+          operator; depositor; epochNumber; minAmount; expiresAt; cashInstrument
+
+    -- Real-path deposit record. In real mode the depositor's CBTC has ALREADY been
+    -- moved into operator custody by the registry (the backend orchestrates the
+    -- transfer before calling this). Unlike Deposit, this does NOT transfer: it records
+    -- a VaultPosition against the operator-owned holding, read through the CIP-56 Holding
+    -- interface so a real registry holding and the local mock are the same type here.
+    -- Operator authority suffices: VaultPosition is signatory operator, and this verifies
+    -- the operator genuinely holds the CBTC (owner == operator). Consuming on the Vault,
+    -- because the pooled total advances with it, mirroring Deposit.
+    --
+    -- Weaker invariant than Deposit, by necessity. Deposit archives the depositor holding
+    -- (Transfer), so each unit of CBTC backs at most one position on-ledger. This holding
+    -- is a foreign registry contract the Vault is not a signatory of, so it CANNOT be
+    -- consumed here; nothing in this choice stops the same holding cid from being recorded
+    -- twice and inflating totalPooledCbtc. Today the only caller is the trusted operator
+    -- backend, which keys the command id on the holding cid so a retry dedups at the
+    -- ledger. A real on-ledger idempotency key (store the source holding cid on the
+    -- position and reject a duplicate) is deferred to the multi-depositor phase, which is
+    -- where concurrent deposits make it reachable.
+    choice RecordDeposit : (ContractId Vault, ContractId VaultPosition)
+      with
+        depositor : Party
+        cbtcCid : ContractId TH.Holding
+        -- Same top-up rule as Deposit; see the note there.
+        topUpPositionCid : Optional (ContractId VaultPosition)
+      controller operator
+      do
+        assertMsg "record: window not open" (windowState == Open)
+        hv <- view <$> fetch cbtcCid
+        assertMsg "record: holding not in operator custody" (hv.owner == operator)
+        assertMsg "record: wrong instrument" (hv.instrumentId.id == "CBTC")
+        assertMsg "record: below minimum" (hv.amount >= minDepositCbtc)
+        positionCid <- depositInto operator depositor epochNumber cashInstrument
+          hv.amount topUpPositionCid
+        vaultCid <- create this with totalPooledCbtc = totalPooledCbtc + hv.amount
+        pure (vaultCid, positionCid)
+
+    -- Reopen deposits for a fresh epoch.
+    choice OpenDeposits : ContractId Vault
+      controller operator
+      do create this with windowState = Open
+
+    -- Aggregate the pooled CBTC into one allocation for the epoch's notional by
+    -- calling the registry's AllocationFactory (real interface). `cbtcPoolCid` is the
+    -- operator's consolidated CBTC holding (see Holding.Merge); `mmBuyer` is the ITM
+    -- receiver, baked into the leg at lock time. `factoryCid` is the registry's
+    -- AllocationFactory (locally a MockAllocationFactory); `allocContext` is its
+    -- disclosed choice context (locally `noContext`).
+    choice LockCollateral : (ContractId Vault, ContractId TA.Allocation)
+      with
+        cbtcPoolCid : ContractId Holding
+        mmBuyer : Party
+        factoryCid : ContractId AI.AllocationFactory
+        allocContext : ExtraArgs
+        requestedAt : Time
+        allocateBefore : Time
+        settleBefore : Time
+      controller operator
+      do
+        assertMsg "lock: window not open" (windowState == Open)
+        pool <- fetch cbtcPoolCid
+        assertMsg "lock: pool owned by operator" (pool.owner == operator)
+        assertMsg "lock: pool not CBTC" (pool.instrument == "CBTC")
+        -- The pool must be exactly what depositors put in: less under-collateralizes
+        -- the call, more locks CBTC no depositor has a claim on.
+        assertMsg "lock: pool != total deposited" (pool.amount == totalPooledCbtc)
+        -- The caller supplies the settlement window (see assertValidAllocationWindow
+        -- for why, and for the bounds enforced on it). Everything that decides WHERE
+        -- the collateral goes (issuer, sender, receiver, executor, instrument,
+        -- amount) is still derived from vault state below, never from the caller.
+        assertValidAllocationWindow settleBufferSeconds requestedAt allocateBefore settleBefore
+        let spec = collateralSpec pool.issuer operator mmBuyer operator "CBTC"
+              totalPooledCbtc requestedAt allocateBefore settleBefore
+        result <- exercise factoryCid AI.AllocationFactory_Allocate with
+          expectedAdmin = pool.issuer
+          allocation = spec
+          requestedAt
+          inputHoldingCids = [toInterfaceContractId @TH.Holding cbtcPoolCid]
+          extraArgs = allocContext
+        case result.output of
+          AI.AllocationInstructionResult_Completed allocationCid -> do
+            vaultCid <- create this with windowState = Locked
+            pure (vaultCid, allocationCid)
+          AI.AllocationInstructionResult_Pending _ ->
+            abort "lock: factory returned Pending; the local factory settles synchronously, so a two-step allocation instruction is a devnet concern to handle in a later phase"
+          AI.AllocationInstructionResult_Failed ->
+            abort "lock: factory returned Failed; the collateral allocation could not be created"
+
+    -- Real-registry variant of LockCollateral: the pooled CBTC is a registry holding
+    -- (utility-registry-holding-v0), not the local mock, so the pool arrives as the
+    -- CIP-56 Holding interface type and its fields are read from the interface view.
+    -- Everything that decides WHERE the collateral goes is still derived from vault
+    -- state below, never from the caller. Kept as a separate choice (not a change to
+    -- LockCollateral) so the package stays an append-only upgrade of the 1.0.0 baseline.
+    choice LockCollateralReal : (ContractId Vault, ContractId TA.Allocation)
+      with
+        cbtcPoolCid : ContractId TH.Holding
+        mmBuyer : Party
+        factoryCid : ContractId AI.AllocationFactory
+        allocContext : ExtraArgs
+        requestedAt : Time
+        allocateBefore : Time
+        settleBefore : Time
+      controller operator
+      do
+        assertMsg "lock: window not open" (windowState == Open)
+        poolView <- view <$> fetch cbtcPoolCid
+        assertMsg "lock: pool owned by operator" (poolView.owner == operator)
+        assertMsg "lock: pool not CBTC" (poolView.instrumentId.id == "CBTC")
+        assertMsg "lock: pool != total deposited" (poolView.amount == totalPooledCbtc)
+        assertValidAllocationWindow settleBufferSeconds requestedAt allocateBefore settleBefore
+        let spec = collateralSpec poolView.instrumentId.admin operator mmBuyer operator "CBTC"
+              totalPooledCbtc requestedAt allocateBefore settleBefore
+        result <- exercise factoryCid AI.AllocationFactory_Allocate with
+          expectedAdmin = poolView.instrumentId.admin
+          allocation = spec
+          requestedAt
+          inputHoldingCids = [cbtcPoolCid]
+          extraArgs = allocContext
+        case result.output of
+          AI.AllocationInstructionResult_Completed allocationCid -> do
+            vaultCid <- create this with windowState = Locked
+            pure (vaultCid, allocationCid)
+          AI.AllocationInstructionResult_Pending _ ->
+            abort "lock: factory returned Pending; a two-step allocation instruction is a later-phase devnet concern"
+          AI.AllocationInstructionResult_Failed ->
+            abort "lock: factory returned Failed; the collateral allocation could not be created"
+
+    -- Write the weekly call against the locked collateral. Strike is derived from
+    -- the spot at open via the demo strike rule.
+    nonconsuming choice WriteCall : ContractId CallOption
+      with
+        mmBuyer : Party
+        collateralAllocationCid : ContractId TA.Allocation
+        spotAtOpen : Decimal
+        premiumUsdc : Decimal
+        notionalCbtc : Decimal
+        expiry : Time
+      -- mmBuyer co-controls the write: the CallOption is signatory operator, mmBuyer
+      -- (so SettleITM carries both authorities for the atomic DvP), and mmBuyer must
+      -- authorize its own signature at creation time. The buyer agreeing to the
+      -- written option is the counterparty consent the covered call needs anyway.
+      controller operator, mmBuyer
+      do
+        assertMsg "write: window not locked" (windowState == Locked)
+        -- Bind the option to real, fully-covering CBTC collateral: the allocation
+        -- must be CBTC, sent by and executable by the operator, and cover exactly
+        -- the notional (read from the allocation's interface view). Otherwise an
+        -- option could be "written" against nothing.
+        collView <- view <$> fetch collateralAllocationCid
+        assertMsg "write: collateral not CBTC"
+          (collView.allocation.transferLeg.instrumentId.id == "CBTC")
+        assertMsg "write: collateral not operator-owned"
+          (collView.allocation.transferLeg.sender == operator)
+        assertMsg "write: collateral executor not operator"
+          (collView.allocation.settlement.executor == operator)
+        assertMsg "write: collateral != notional"
+          (collView.allocation.transferLeg.amount == notionalCbtc)
+        assertMsg "write: collateral receiver != buyer"
+          (collView.allocation.transferLeg.receiver == mmBuyer)
+        -- The collateral must remain settleable for the whole life of the option it
+        -- backs. Otherwise the allocation's settle window closes first, the collateral
+        -- becomes withdrawable while the call is still live, and the buyer holds an
+        -- option that cannot be delivered against after paying a premium it cannot
+        -- recover.
+        assertMsg "write: option outlives collateral settlement window"
+          (expiry <= collView.allocation.settlement.settleBefore)
+        create CallOption with
+          operator
+          mmBuyer
+          oracleParty
+          notionalCbtc
+          strikeUsdcPerCbtc = spotAtOpen * (1.0 + strikePct)
+          premiumUsdc
+          cashInstrument
+          collateralAllocationCid
+          epochNumber
+          expiry
+          maxObservationAge
+          state = Written
+
+    -- Close the epoch. Aggregates are DERIVED from the positions and receipts handed
+    -- in, never asserted by the operator: the report is the ledger's account of the
+    -- epoch, not the operator's. Emits one report copy per depositor (each visible
+    -- only to that depositor), so the aggregate reaches everyone without any depositor
+    -- learning who the other depositors are. Positions are closed out separately by
+    -- RollPositions, which branches on the settlement path.
+    choice RecordEpoch : (ContractId Vault, [ContractId EpochReport])
+      with
+        positionCids : [ContractId VaultPosition]
+        receiptCids : [ContractId PremiumReceipt]
+        settlementCid : ContractId EpochSettlement
+      controller operator
+      do
+        settlement <- fetch settlementCid
+        positions <- mapA fetch positionCids
+        receipts <- mapA fetch receiptCids
+
+        (depositors, totalNotionalCbtc, totalPremiumUsdc) <-
+          validateEpochRecord operator epochNumber totalPooledCbtc positions receipts
+        checkEpochSettlement settlement operator epochNumber totalPremiumUsdc
+        let depositorCount = length positions
+
+        reportCids <- forA depositors (\dep ->
+          create EpochReport with
+            operator
+            depositor = dep
+            epochNumber
+            settlementPath = settlement.settlementPath
+            totalPremiumUsdc
+            totalNotionalCbtc
+            depositorCount
+            collateralReturned = settlement.collateralReturned
+            tsSettled = settlement.tsSettled
+            observedPrice = Some settlement.observedPrice
+            strikeUsdcPerCbtc = Some settlement.strikeUsdcPerCbtc)
+
+        -- RecordEpoch reports and advances the counter. It does NOT roll positions.
+        -- Rolling requires moving real CBTC (splitting the recovered pool to pay
+        -- withdrawers) and, on the ITM path, there is no CBTC left to move. That
+        -- branch lives in Vault.RollPositions, Task 6b.
+        -- Window stays CLOSED across the advance; RollPositions reopens it. See M3.
+        vaultCid <- create this with
+          epochNumber = epochNumber + 1
+          windowState = Locked
+          totalPooledCbtc = 0.0
+        pure (vaultCid, reportCids)
+
+    -- Close out the settled epoch's positions. The settlement path decides what
+    -- depositors own: see Overwrite.Rollover for the OTM (pay + roll) and ITM
+    -- (close + distribute) branches. Rolling after ITM would mint a CBTC claim
+    -- the vault cannot honor, so that branch refuses rather than rolling.
+    choice RollPositions : (ContractId Vault, [ContractId VaultPosition])
+      with
+        positionCids : [ContractId VaultPosition]
+        settlementCid : ContractId EpochSettlement
+        poolCid : Optional (ContractId Holding)
+        proceedsCid : Optional (ContractId Holding)
+      controller operator
+      do
+        (newTotalPooledCbtc, rolledCids) <- runRollPositions RollPositionsArgs with
+          operator; epochNumber; cashInstrument; positionCids; settlementCid; poolCid; proceedsCid
+        -- Reopen the window the settled epoch closed (see RecordEpoch, M3).
+        vaultCid <- create this with
+          totalPooledCbtc = newTotalPooledCbtc
+          windowState = Open
+        pure (vaultCid, rolledCids)
+
+-- Self-custody deposit handle (propose/accept). In custodial mode the backend
+-- skips this and submits the equivalent `actAs [depositor, operator]` command
+-- directly (see Vault.Deposit).
+template DepositInvite
+  with
+    operator : Party
+    depositor : Party
+    epochNumber : Int
+    minAmount : Decimal
+    expiresAt : Time
+    cashInstrument : Text
+  where
+    signatory operator
+    observer depositor
+
+    -- Depositor accepts: routes through Vault.Deposit so the self-custody path
+    -- also advances the vault's pooled total, in one transaction. Because
+    -- DepositInvite's signatory is operator and AcceptDeposit's controller is
+    -- depositor, the transaction carries both authorities.
+    choice AcceptDeposit : (ContractId Vault, ContractId VaultPosition)
+      with
+        vaultCid : ContractId Vault
+        cbtcCid : ContractId Holding
+        -- Passed straight through to Deposit, so the self-custody path obeys the same
+        -- one-position-per-depositor-per-epoch rule as the custodial one.
+        topUpPositionCid : Optional (ContractId VaultPosition)
+      controller depositor
+      do
+        now <- getTime
+        assertMsg "accept: invite expired" (now <= expiresAt)
+        h <- fetch cbtcCid
+        assertMsg "accept: below invite minimum" (h.amount >= minAmount)
+        exercise vaultCid Deposit with depositor; cbtcCid; topUpPositionCid

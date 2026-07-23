@@ -1,0 +1,27 @@
+module Overwrite.EpochSettlement where
+
+import Overwrite.Types
+
+template EpochSettlement
+  with
+    operator : Party
+    mmBuyer : Party
+    epochNumber : Int
+    settlementPath : SettlementPath
+    observedPrice : Decimal
+    strikeUsdcPerCbtc : Decimal
+    notionalCbtc : Decimal
+    premiumUsdc : Decimal
+    collateralReturned : Bool
+    tsSettled : Time
+  where
+    signatory operator, mmBuyer
+
+checkEpochSettlement : EpochSettlement -> Party -> Int -> Decimal -> Update ()
+checkEpochSettlement settlement operator epochNumber totalPremiumUsdc = do
+  assertMsg "record: settlement from wrong epoch"
+    (settlement.epochNumber == epochNumber)
+  assertMsg "record: settlement from wrong operator"
+    (settlement.operator == operator)
+  assertMsg "record: receipts do not conserve option premium"
+    (totalPremiumUsdc == settlement.premiumUsdc)

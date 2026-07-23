@@ -1,0 +1,90 @@
+/* Design tokens. The only place raw colors, sizes, and easings are defined.
+   Everything downstream references a token, so a palette change is one file. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surface ramp. Each step is a real elevation, not an arbitrary gray. */
+  --bg: #0a0c11;
+  --surface-1: #11141b;
+  --surface-2: #171b24;
+  --surface-3: #1e232e;
+
+  /* Hairlines. Used sparingly: elevation carries most of the separation. */
+  --line: #232936;
+  --line-strong: #2f3746;
+
+  /* Text ramp. Every tier clears WCAG AA (4.5:1) for small text on every surface
+     above, because --text-3 carries card titles, table headers, and disclaimers at
+     --text-xs. Its old value (#737d90) measured 4.16 on --surface-2 and failed. */
+  --text-1: #eef1f6;
+  --text-2: #a3abbb;
+  --text-3: #7f8a9e;
+
+  /* Accent: bitcoin orange. Reserved for brand and the single primary action.
+     Never used to color data, or it starts to imply a value judgement. */
+  --accent: #f7931a;
+  --accent-dim: #b96c10;
+  /* Text on an --accent fill. A near-black brown, ~8:1 on the orange (white would be
+     ~2.3:1 and fail). The one color allowed to sit on the accent. */
+  --on-accent: #1a1206;
+
+  /* Semantic tones for badges and states. */
+  --warn: #ffcf70;
+  --warn-line: #5a4a20;
+  --warn-bg: #2a2213;
+  --info: #7fb6ff;
+  --info-line: #244066;
+  --info-bg: #131d2b;
+  --danger: #ff9a92;
+  --danger-line: #6a2f2c;
+  --danger-bg: #2a1615;
+
+  /* Type scale, 1.25 ratio, capped: this is a data UI, not a landing page. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-display: 1.75rem;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  /* Spacing scale, 4px base. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Radii. Concentric: an inner surface inset by --space-N from a --radius-lg
+     parent should use --radius-md, so the curves stay parallel. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* Elevation. Layered translucent shadows read as depth on any background;
+     a single hard border does not. */
+  --shadow-1:
+    0 0 0 1px rgb(255 255 255 / 0.04),
+    0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-2:
+    0 0 0 1px rgb(255 255 255 / 0.05),
+    0 2px 4px rgb(0 0 0 / 0.25),
+    0 8px 24px -8px rgb(0 0 0 / 0.5);
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* One easing. Interruptible transitions only; no keyframes for state changes. */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --duration: 140ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration: 0ms;
+  }
+}

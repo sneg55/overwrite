@@ -1,0 +1,36 @@
+{
+  "$schema": "../node_modules/testreel/recording-definition.schema.json",
+  "url": "http://localhost:3000/app",
+  "viewport": { "width": 1280, "height": 720 },
+  "colorScheme": "dark",
+  "outputFormat": "mp4",
+  "cookies": [
+    { "name": "overwrite-party", "value": "operator", "domain": "localhost", "path": "/" }
+  ],
+  "cursor": {
+    "enabled": true,
+    "size": 26,
+    "color": "#f7931a",
+    "rippleColor": "#ffb454",
+    "rippleSize": 44,
+    "idleHide": false,
+    "transitionMs": 650
+  },
+  "steps": [
+    { "action": "wait", "ms": 2600 },
+    { "action": "scroll", "y": 300 },
+    { "action": "wait", "ms": 1400 },
+    { "action": "click", "selector": "button:has-text(\"Pause\")" },
+    { "action": "wait", "ms": 2400 },
+    { "action": "click", "selector": "button:has-text(\"Step\")" },
+    { "action": "wait", "ms": 2400 },
+    { "action": "click", "selector": "button:has-text(\"Step\")" },
+    { "action": "wait", "ms": 2400 },
+    { "action": "click", "selector": "button:has-text(\"Resume\")" },
+    { "action": "wait", "ms": 5000 },
+    { "action": "navigate", "url": "http://localhost:3000/app" },
+    { "action": "wait", "ms": 2400 },
+    { "action": "scroll", "y": 620 },
+    { "action": "wait", "ms": 3000 }
+  ]
+}

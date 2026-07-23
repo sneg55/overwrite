@@ -1,0 +1,121 @@
+[
+  {
+    "id": "intro",
+    "sec": 15,
+    "kind": "card",
+    "caption": "Overwrite: a CBTC covered-call vault on Canton",
+    "narrate": "Overwrite is a covered call vault for C B T C on Canton. Deposit Bitcoin, the vault writes a call against it, and the premium is paid to holders on chain. With a book nobody else can read.",
+    "block": {
+      "type": "title",
+      "brand": "Overwrite",
+      "sub": "A CBTC covered-call vault on Canton",
+      "tag": "deposit  ·  write  ·  settle  ·  roll"
+    }
+  },
+  {
+    "id": "problem",
+    "sec": 22,
+    "kind": "card",
+    "caption": "Why this does not exist yet",
+    "narrate": "Two things are missing today. C B T C holders have no self serve on chain yield on Canton. And on a public chain vault the whole book is readable: depositors, size, strikes, roll timing. Market makers price against that flow, and an institution will not display its Bitcoin position for anyone to read.",
+    "block": {
+      "type": "bullets",
+      "title": "The gap",
+      "rows": [
+        "No self-serve on-chain BTC yield on Canton",
+        "On a public chain, the whole book is readable",
+        "Institutions will not display their BTC position"
+      ]
+    }
+  },
+  {
+    "id": "landing",
+    "sec": 22,
+    "kind": "ui",
+    "capture": "landing",
+    "caption": "One epoch is one full option lifecycle",
+    "narrate": "So privacy is the product, not a feature. A production epoch is one week. This demo compresses it to seconds, so you can watch a whole one. Every step is a state change on the ledger: deposits open, collateral locks, the vault writes the call, and at expiry exactly one of two settlement paths runs."
+  },
+  {
+    "id": "engine",
+    "sec": 32,
+    "kind": "ui",
+    "capture": "vault",
+    "caption": "The operator's control room: the scheduler is its own process",
+    "narrate": "This is the operator's control room. The scheduler runs as its own process and drives every transition on a tick. Pausing stops it between ticks, never mid transaction, so stepping is safe. Step, and it settles the expiring call. Step again, and it records the epoch. Resume, and the engine locks collateral for the next epoch, writes a new call, and the market maker pays the premium."
+  },
+  {
+    "id": "deposit",
+    "sec": 20,
+    "kind": "ui",
+    "capture": "deposit",
+    "caption": "A deposit is a real write to a real ledger",
+    "narrate": "A depositor can write to it too. Alice deposits half a C B T C. Review is the deliberate confirm before the write, and the app submits to the ledger. Her position comes back as a contract signed by the operator and by Alice, and by nobody else."
+  },
+  {
+    "id": "privacy",
+    "sec": 31,
+    "kind": "ui",
+    "capture": "privacy",
+    "caption": "Privacy is the Daml signatory model, not a UI filter",
+    "narrate": "Here is the part that matters. The operator is a signatory on every position, so the operator sees the whole book, and each row reports what that depositor's own session actually returns. Now switch to Alice. The app re-reads the ledger with Alice's own key, server side. She sees her own deposit and her own premium. Bob and Carol are not hidden from her. They are simply not in her view of the ledger."
+  },
+  {
+    "id": "reports",
+    "sec": 24,
+    "kind": "ui",
+    "capture": "reports",
+    "caption": "Settled epochs: aggregate only, no per-holder payout list",
+    "narrate": "Every settled epoch is recorded as an aggregate report: the settlement price, the strike, the premium, and a depositor count. There is no per holder payout list anywhere in it. Each receipt is visible only to the depositor who received it. The price feed and the market maker here are simulated, and every premium figure is a demo parameter, not market pricing."
+  },
+  {
+    "id": "devnet",
+    "sec": 26,
+    "kind": "term",
+    "caption": "The collateral lock runs against the real CIP-56 registry on devnet",
+    "narrate": "The collateral lock is not a mock. On the Canton hack net the package is uploaded and vetted, and real C B T C is deposited and locked through the vault using the registry's own allocation factory, which is the token standard's lock and settlement primitive. That allocation is still live on the ledger today. The rest of the lifecycle runs on a local Canton sandbox.",
+    "block": {
+      "type": "term",
+      "prompt": "bun scripts/verify-dar dist/overwrite-vault-1.1.0.dar",
+      "lines": [
+        { "text": "participant carries 142 packages", "cls": "plain" },
+        { "text": "  1.1.0 candidate bffa00c2...  present=true", "cls": "good" },
+        { "text": "  CLOSURE OK: every bundled package already present", "cls": "good" },
+        { "text": "", "cls": "plain" },
+        { "text": "read back from the devnet ledger:", "cls": "dim" },
+        { "text": "  vault windowState    Locked", "cls": "hi" },
+        { "text": "  alice principalCbtc  0.99 CBTC", "cls": "plain" },
+        { "text": "  DvpLegAllocation     00f478d7...", "cls": "good" }
+      ]
+    }
+  },
+  {
+    "id": "settlement",
+    "sec": 22,
+    "kind": "card",
+    "caption": "At expiry, exactly one of two paths runs",
+    "narrate": "At expiry, out of the money returns the collateral and holders keep the premium. In the money moves the locked C B T C and the strike cash in one atomic transaction. No escrow contract in between. No public mempool to front run. Collateral is locked on chain, so there is no unsecured counterparty exposure.",
+    "block": {
+      "type": "bullets",
+      "title": "Settlement",
+      "rows": [
+        "OTM: collateral released, holders keep the premium",
+        "ITM: locked CBTC against strike cash, one atomic DvP",
+        "No escrow contract, no public mempool"
+      ]
+    }
+  },
+  {
+    "id": "outro",
+    "sec": 12,
+    "kind": "card",
+    "caption": "Overwrite: built for HackCanton S2",
+    "narrate": "Overwrite. Institutional Bitcoin premium, with a book nobody can see. Built on Canton for Hack Canton season two. The repository is linked below.",
+    "block": {
+      "type": "title",
+      "brand": "Overwrite",
+      "sub": "Institutional BTC premium, with a book nobody can see.",
+      "tag": "market maker + price feed simulated  ·  premium figures are demo parameters"
+    }
+  }
+]

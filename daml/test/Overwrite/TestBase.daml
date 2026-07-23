@@ -1,0 +1,132 @@
+-- Shared setup + helpers for the lifecycle test modules.
+module Overwrite.TestBase where
+
+import DA.Time (hours, addRelTime)
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.CallOption
+import Overwrite.EpochSettlement
+import Overwrite.PremiumReceipt
+import Overwrite.PriceObservation
+import Overwrite.Types
+import Overwrite.Vault
+import Overwrite.VaultPosition
+import qualified Splice.Api.Token.AllocationV1 as TA
+import qualified Splice.Api.Token.AllocationInstructionV1 as AI
+import qualified Splice.Api.Token.HoldingV1 as TH
+
+makeHolding : Party -> Party -> Text -> Decimal -> Script (ContractId Holding)
+makeHolding issuer owner instrument amount =
+  submit issuer $ createCmd Holding with issuer; owner; instrument; amount
+
+-- The local stand-in for the registry's AllocationFactory, admin = the CBTC issuer
+-- (so the factory carries issuer authority: see MockAllocationFactory), user = the
+-- caller allowed to see and exercise it (the operator). Returns the interface cid
+-- LockCollateral expects. AllocationFactory_Allocate is nonconsuming, so one factory
+-- serves every lock in a script.
+newFactory : Party -> Party -> Script (ContractId AI.AllocationFactory)
+newFactory cbtcIssuer user = do
+  cid <- submit cbtcIssuer $ createCmd MockAllocationFactory with admin = cbtcIssuer; user
+  pure (toInterfaceContractId @AI.AllocationFactory cid)
+
+-- The settlement results now hand back registry Holding-interface cids; the demo
+-- suite works with the concrete Holding template, so coerce back. The underlying
+-- contract is always a demo Holding (MockAllocation delivers one), so this is safe.
+asHolding : ContractId TH.Holding -> ContractId Holding
+asHolding = fromInterfaceContractId
+
+-- Cash leg of the ITM DvP: the buyer allocates the strike cash to the operator.
+-- sender = the cash holding's owner (mmBuyer), receiver = operator, executor =
+-- operator. Time windows are demo values (no guard reads them).
+allocateCashTo : Parties -> Party -> ContractId Holding -> Script (ContractId TA.Allocation)
+allocateCashTo p receiver cashCid = do
+  now <- getTime
+  submit p.mmBuyer $ exerciseCmd cashCid (Allocate with
+    executor = p.operator
+    receiver
+    allocateBefore = addRelTime now (hours 48)
+    settleBefore = addRelTime now (hours 48)
+    requestedAt = now)
+
+allocateCash : Parties -> ContractId Holding -> Script (ContractId TA.Allocation)
+allocateCash p cashCid = allocateCashTo p p.operator cashCid
+
+-- The settlement window LockCollateral takes as choice arguments. Daml no longer
+-- picks this with getTime: the caller supplies it so the registry's off-ledger
+-- choice context can be fetched for the exact arguments the submission carries.
+-- Mirrors what the backend scheduler computes (see the lockCollateral handler in
+-- backend/src/features/epoch-scheduler/handlers.ts). The buffer here matches the
+-- test vault's settleBufferSeconds (hours 1, set in makeVault below).
+lockWindow : Script (Time, Time, Time)
+lockWindow = do
+  now <- getTime
+  let allocateBefore = addRelTime now (hours 24)
+  pure (now, allocateBefore, addRelTime allocateBefore (hours 1))
+
+-- Lock the pool with the standard demo window and an empty choice context, which
+-- is what every test that is not specifically exercising the window guards wants.
+-- Tests that DO exercise those guards (see VaultGuardTest) build the choice
+-- arguments explicitly instead of calling this.
+stdLock : Parties -> ContractId Vault -> ContractId Holding
+  -> Script (ContractId Vault, ContractId TA.Allocation)
+stdLock p vaultCid pool = do
+  (requestedAt, allocateBefore, settleBefore) <- lockWindow
+  submit p.operator $ exerciseCmd vaultCid (LockCollateral with
+    cbtcPoolCid = pool; mmBuyer = p.mmBuyer; factoryCid = p.factory
+    allocContext = noContext; requestedAt; allocateBefore; settleBefore)
+
+findHolding : Party -> Text -> Party -> Script (ContractId Holding)
+findHolding viewer instrument owner = do
+  hs <- query @Holding viewer
+  case [cid | (cid, h) <- hs, h.instrument == instrument, h.owner == owner] of
+    (cid :: _) -> pure cid
+    [] -> error ("no holding found: " <> instrument)
+
+-- Consolidate all of the operator's CBTC holdings into one (the pool).
+mergeInto : Party -> ContractId Holding -> [ContractId Holding] -> Script (ContractId Holding)
+mergeInto _ acc [] = pure acc
+mergeInto op acc (c :: cs) = do
+  acc' <- submit op $ exerciseCmd acc (Merge with otherCid = c)
+  mergeInto op acc' cs
+
+consolidateCbtc : Party -> Script (ContractId Holding)
+consolidateCbtc operator = do
+  hs <- query @Holding operator
+  case [cid | (cid, h) <- hs, h.instrument == "CBTC", h.owner == operator] of
+    [] -> error "no CBTC to consolidate"
+    (first :: rest) -> mergeInto operator first rest
+
+data Parties = Parties
+  with
+    cbtcIssuer : Party
+    operator : Party
+    oracle : Party
+    mmBuyer : Party
+    alice : Party
+    factory : ContractId AI.AllocationFactory  -- the demo AllocationFactory (admin = cbtcIssuer)
+
+setupParties : Script Parties
+setupParties = do
+  cbtcIssuer <- allocateParty "cbtcIssuer"
+  operator <- allocateParty "operator"
+  oracle <- allocateParty "oracle"
+  mmBuyer <- allocateParty "mmBuyer"
+  alice <- allocateParty "alice"
+  factory <- newFactory cbtcIssuer operator
+  pure Parties with cbtcIssuer; operator; oracle; mmBuyer; alice; factory
+
+newVault : Parties -> Script (ContractId Vault)
+newVault p =
+  submit p.operator $ createCmd Vault with
+    operator = p.operator
+    oracleParty = p.oracle
+    epochNumber = 1
+    windowState = Open
+    strikePct = 0.1
+    premiumSplitPct = 1.0
+    cashInstrument = "mUSDC"
+    maxObservationAge = hours 1
+    settleBufferSeconds = hours 1
+    totalPooledCbtc = 0.0
+    minDepositCbtc = 0.01

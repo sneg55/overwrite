@@ -1,0 +1,281 @@
+-- Post-settlement position lifecycle proofs: Vault.RollPositions branches on the
+-- settlement path (Task 6b). Split out of Overwrite.LifecycleTest by the
+-- file-size rule; the full-lifecycle and RecordEpoch proofs stay there.
+module Overwrite.RolloverTest where
+
+import DA.List (head)
+import DA.Time (hours, addRelTime)
+import Daml.Script
+
+import Overwrite.Fixtures
+import Overwrite.Allocation
+import Overwrite.CallOption
+import Overwrite.PriceObservation
+import Overwrite.SettlementReceipt
+import Overwrite.Vault
+import Overwrite.VaultPosition
+import Overwrite.TestBase
+
+-- After an OTM epoch the collateral is back in the vault, so a withdrawing
+-- depositor is paid principal in CBTC and the rest roll with principal unchanged.
+testRollAfterOtmPaysPrincipalAndRolls : Script ()
+testRollAfterOtmPaysPrincipalAndRolls = do
+  p <- setupParties
+  f <- twoDepositorSettledEpoch p   -- bob queued a withdrawal
+  (vaultCid, _) <- submit p.operator do
+    exerciseCmd f.vaultCid RecordEpoch with
+      positionCids = [f.alicePosition, f.bobPosition]
+      receiptCids = [f.aliceReceipt, f.bobReceipt]
+      settlementCid = f.epochSettlementCid
+
+  (vaultCid', rolled) <- submit p.operator do
+    exerciseCmd vaultCid RollPositions with
+      positionCids = [f.alicePosition, f.bobPosition]
+      settlementCid = f.epochSettlementCid
+      poolCid = Some f.recoveredPoolCid
+      proceedsCid = None
+
+  assertMsg "only alice rolls" (length rolled == 1)
+  pos <- queryContractId p.operator (head rolled)
+  case pos of
+    None -> abort "rolled position missing"
+    Some position -> do
+      assertMsg "alice rolled" (position.depositor == p.alice)
+      assertMsg "into next epoch" (position.epochNumber == f.epochNumber + 1)
+      assertMsg "principal unchanged" (position.principalCbtc == f.alicePrincipal)
+
+  v <- queryContractId p.operator vaultCid'
+  case v of
+    None -> abort "vault missing"
+    Some vault -> assertMsg "pool equals rolled principal"
+      (vault.totalPooledCbtc == f.alicePrincipal)
+
+-- After an ITM epoch the CBTC is gone. Every position closes and every depositor
+-- is paid pro-rata strike proceeds in cash, with a receipt. Nothing rolls.
+testRollAfterItmClosesAllAndDistributesProceeds : Script ()
+testRollAfterItmClosesAllAndDistributesProceeds = do
+  p <- setupParties
+  f <- twoDepositorItmSettledEpoch p
+
+  (vaultCid, _) <- submit p.operator do
+    exerciseCmd f.vaultCid RecordEpoch with
+      positionCids = [f.alicePosition, f.bobPosition]
+      receiptCids = [f.aliceReceipt, f.bobReceipt]
+      settlementCid = f.epochSettlementCid
+
+  (vaultCid', rolled) <- submit p.operator do
+    exerciseCmd vaultCid RollPositions with
+      positionCids = [f.alicePosition, f.bobPosition]
+      settlementCid = f.epochSettlementCid
+      poolCid = None
+      proceedsCid = Some f.strikeProceedsCid
+
+  assertMsg "nothing rolls after ITM" (null rolled)
+
+  v <- queryContractId p.operator vaultCid'
+  case v of
+    None -> abort "vault missing"
+    Some vault -> assertMsg "pool is empty after ITM" (vault.totalPooledCbtc == 0.0)
+
+  -- Alice sees only her own settlement receipt, and it pays her pro-rata share.
+  receipts <- query @SettlementReceipt p.alice
+  assertMsg "alice sees exactly one settlement receipt" (length receipts == 1)
+  let (_, r) = head receipts
+  assertMsg "alice's receipt is hers" (r.depositor == p.alice)
+  assertMsg "pro-rata proceeds"
+    (r.proceedsUsdc == f.totalProceeds * f.alicePrincipal / f.totalPrincipal)
+
+  bobReceipts <- query @SettlementReceipt f.bob
+  assertMsg "bob sees only his own" (length bobReceipts == 1)
+
+-- An ITM settlement record must select the ITM branch even when the supplied
+-- holdings would make the OTM branch succeed.
+testRollUsesRecordedPathNotArg : Script ()
+testRollUsesRecordedPathNotArg = do
+  p <- setupParties
+  f <- twoDepositorItmSettledEpoch p
+  (vaultCid, _) <- submit p.operator do
+    exerciseCmd f.vaultCid RecordEpoch with
+      positionCids = [f.alicePosition, f.bobPosition]
+      receiptCids = [f.aliceReceipt, f.bobReceipt]
+      settlementCid = f.epochSettlementCid
+  fakePoolCid <- makeHolding p.cbtcIssuer p.operator "CBTC" f.totalPrincipal
+  submitMustFail p.operator do
+    exerciseCmd vaultCid RollPositions with
+      positionCids = [f.alicePosition, f.bobPosition]
+      settlementCid = f.epochSettlementCid
+      poolCid = Some fakePoolCid
+      proceedsCid = None
+
+-- Bug regression (Task 6b, bug 1): a single depositor withdrawing 100% of the
+-- pool after OTM settlement must not abort RollPositions. The recovered pool
+-- exactly equals the sole withdrawer's principal, so `Holding.Split` (which
+-- requires splitAmount strictly < amount) cannot be used to pay them; rollOtm
+-- must hand the whole pool holding to ReturnPrincipal instead. Before the fix
+-- this test aborts inside `Split` with "split: amount out of range".
+testRollOtmAllWithdrawReturnsFullPool : Script ()
+testRollOtmAllWithdrawReturnsFullPool = do
+  p <- setupParties
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault1, alicePosition0) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+
+  pool <- consolidateCbtc p.operator
+  (vault2, allocCid) <- stdLock p vault1 pool
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault2 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 60000.0
+      premiumUsdc = 100.0; notionalCbtc = 1.0; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 100.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  vaultUsdc <- findHolding p.operator "mUSDC" p.operator
+  (_, aliceReceipt) <- submit p.operator $
+    exerciseCmd alicePosition0 (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = vaultUsdc; transferRef = "e1-alice")
+
+  alicePosition <- submit p.alice $ exerciseCmd alicePosition0 QueueWithdraw
+
+  passTime (hours 2)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 60000.0; source = "test"; observedAt = expiry; isDemo = True
+  (withdrawRes, settlementCid) <- submit p.operator $
+    exerciseCmd optionActive (SettleOTM with obsCid = obs; cbtcContext = noContext)
+  [recoveredIfc] <- pure withdrawRes.senderHoldingCids
+  let recoveredPoolCid = asHolding recoveredIfc
+
+  (vaultRecorded, _) <- submit p.operator do
+    exerciseCmd vault2 RecordEpoch with
+      positionCids = [alicePosition]
+      receiptCids = [aliceReceipt]
+      settlementCid
+
+  (vaultFinal, rolled) <- submit p.operator do
+    exerciseCmd vaultRecorded RollPositions with
+      positionCids = [alicePosition]
+      settlementCid
+      poolCid = Some recoveredPoolCid
+      proceedsCid = None
+
+  assertMsg "nothing rolls: the sole depositor withdrew everything" (null rolled)
+
+  aliceCbtcCid <- findHolding p.alice "CBTC" p.alice
+  mbHolding <- queryContractId p.alice aliceCbtcCid
+  case mbHolding of
+    None -> abort "alice's returned CBTC holding is missing"
+    Some h -> assertMsg "alice's principal returned in full" (h.amount == 1.0)
+
+  v <- queryContractId p.operator vaultFinal
+  case v of
+    None -> abort "vault missing"
+    Some vault -> assertMsg "pool empty: the sole depositor withdrew everything"
+      (vault.totalPooledCbtc == 0.0)
+
+-- Bug regression (Task 6b, bug 2): three depositors whose principals do not
+-- divide the strike proceeds evenly. spotAtOpen/principals below were picked
+-- so that, verified directly against the Daml Decimal engine, the naive
+-- per-position formula `totalProceeds * principal / totalPrincipal` leaves
+-- 0.0000000001 unaccounted for (strike = 37021.2266928584, totalProceeds =
+-- 169873.7305200945). Before the fix the old code silently stranded that
+-- 0.0000000001 in a discarded holding and underpaid the last-processed
+-- depositor by it (the sum-of-receipts assertion below catches that); a
+-- differently-shaped input can also make it reuse an archived cid and abort
+-- outright. The fix (last position always takes the whole remaining holding)
+-- must reconstruct the total exactly, with no dust and no abort.
+testRollItmUnevenProceedsNoDust : Script ()
+testRollItmUnevenProceedsNoDust = do
+  p <- setupParties
+  bob <- allocateParty "bob"
+  carol <- allocateParty "carol"
+  now <- getTime
+  let expiry = addRelTime now (hours 1)
+  let totalProceeds = 169873.7305200945
+
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 0.9428736641
+  (vault0a, alicePosition) <- submitMulti [p.operator, p.alice] [] $
+    exerciseCmd vault0 (Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None)
+  bobCbtc <- makeHolding p.cbtcIssuer bob "CBTC" 0.5980239902
+  (vault0b, bobPosition) <- submitMulti [p.operator, bob] [] $
+    exerciseCmd vault0a (Deposit with depositor = bob; cbtcCid = bobCbtc; topUpPositionCid = None)
+  carolCbtc <- makeHolding p.cbtcIssuer carol "CBTC" 3.0476518265
+  (vault0c, carolPosition) <- submitMulti [p.operator, carol] [] $
+    exerciseCmd vault0b (Deposit with depositor = carol; cbtcCid = carolCbtc; topUpPositionCid = None)
+
+  pool <- consolidateCbtc p.operator
+  (vault1, allocCid) <- stdLock p vault0c pool
+  -- strike = spotAtOpen * (1 + strikePct) = 33655.6606298713 * 1.1 = 37021.2266928584
+  option <- submitMulti [p.operator, p.mmBuyer] [] $
+    exerciseCmd vault1 (WriteCall with
+      mmBuyer = p.mmBuyer; collateralAllocationCid = allocCid; spotAtOpen = 33655.6606298713
+      premiumUsdc = 300.0; notionalCbtc = 4.5885494808; expiry)
+
+  buyerPremium <- makeHolding p.operator p.mmBuyer "mUSDC" 300.0
+  optionActive <- submit p.mmBuyer $ exerciseCmd option (PayPremium with premiumCid = buyerPremium)
+
+  vaultUsdc <- findHolding p.operator "mUSDC" p.operator
+  (aliceChunk, rest1) <- submit p.operator $ exerciseCmd vaultUsdc (Split with splitAmount = 100.0)
+  (bobChunk, carolChunk) <- submit p.operator $ exerciseCmd rest1 (Split with splitAmount = 100.0)
+  (_, aliceReceipt) <- submit p.operator $
+    exerciseCmd alicePosition (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = aliceChunk; transferRef = "e1-alice")
+  (_, bobReceipt) <- submit p.operator $
+    exerciseCmd bobPosition (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = bobChunk; transferRef = "e1-bob")
+  (_, carolReceipt) <- submit p.operator $
+    exerciseCmd carolPosition (PayoutPremium with
+      premiumUsdc = 100.0; usdcCid = carolChunk; transferRef = "e1-carol")
+
+  -- buyer allocates the strike payment, executor = operator
+  buyerCash <- makeHolding p.operator p.mmBuyer "mUSDC" totalProceeds
+  cashAlloc <- allocateCash p buyerCash
+
+  passTime (hours 2)
+  -- ITM: price (40000) > strike (37021.2266928584)
+  obs <- submit p.oracle $ createCmd PriceObservation with
+    oracleParty = p.oracle; operator = p.operator; asset = "CBTC"; epochNumber = 1
+    price = 40000.0; source = "test"; observedAt = expiry; isDemo = True
+  (_, cashRes, settlementCid) <- submit p.operator $
+    exerciseCmd optionActive (SettleITM with obsCid = obs; cashAllocationCid = cashAlloc; cbtcContext = noContext; cashContext = noContext)
+  [strikeProceedsIfc] <- pure cashRes.receiverHoldingCids
+  let strikeProceedsCid = asHolding strikeProceedsIfc
+
+  (vaultRecorded, _) <- submit p.operator do
+    exerciseCmd vault1 RecordEpoch with
+      positionCids = [alicePosition, bobPosition, carolPosition]
+      receiptCids = [aliceReceipt, bobReceipt, carolReceipt]
+      settlementCid
+
+  (vaultFinal, rolled) <- submit p.operator do
+    exerciseCmd vaultRecorded RollPositions with
+      positionCids = [alicePosition, bobPosition, carolPosition]
+      settlementCid
+      poolCid = None
+      proceedsCid = Some strikeProceedsCid
+
+  assertMsg "nothing rolls after ITM" (null rolled)
+
+  aliceReceipts <- query @SettlementReceipt p.alice
+  bobReceipts <- query @SettlementReceipt bob
+  carolReceipts <- query @SettlementReceipt carol
+  assertMsg "alice has exactly one settlement receipt" (length aliceReceipts == 1)
+  assertMsg "bob has exactly one settlement receipt" (length bobReceipts == 1)
+  assertMsg "carol has exactly one settlement receipt" (length carolReceipts == 1)
+
+  let (_, aliceR) = head aliceReceipts
+  let (_, bobR) = head bobReceipts
+  let (_, carolR) = head carolReceipts
+  let sumPaid = aliceR.proceedsUsdc + bobR.proceedsUsdc + carolR.proceedsUsdc
+  assertMsg "no dust: the three shares reconstruct the exact total proceeds"
+    (sumPaid == totalProceeds)
+
+  v <- queryContractId p.operator vaultFinal
+  case v of
+    None -> abort "vault missing"
+    Some vault -> assertMsg "pool is empty after ITM" (vault.totalPooledCbtc == 0.0)

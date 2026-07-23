@@ -1,0 +1,53 @@
+-- Validation and aggregate derivation for Vault.RecordEpoch.
+--
+-- Split out of Overwrite.Vault to keep that module under the file-size limit. Only
+-- pure helpers moved: under smart contract upgrades a template's module name is part
+-- of its identity, so the Vault and DepositInvite templates must stay in
+-- Overwrite.Vault or an upgrade from an already-deployed package would not typecheck.
+-- Choice BODIES may change across an upgrade; template locations may not.
+module Overwrite.VaultRecord where
+
+import DA.Foldable (mapA_)
+import DA.List (sort, unique)
+
+import Overwrite.PremiumReceipt
+import Overwrite.VaultPosition
+
+-- Check that the positions and receipts handed to RecordEpoch really describe this
+-- vault's current epoch, then derive the aggregates the per-depositor reports are
+-- built from. Returns (depositors, totalNotionalCbtc, totalPremiumUsdc).
+--
+-- These are the checks that stop an operator from shaping the report: omitting a
+-- depositor to shrink it, double-counting one, or smuggling in a cid from another
+-- vault or a stale epoch.
+validateEpochRecord :
+  Party -> Int -> Decimal -> [VaultPosition] -> [PremiumReceipt]
+  -> Update ([Party], Decimal, Decimal)
+validateEpochRecord operator epochNumber totalPooledCbtc positions receipts = do
+  mapA_ (\pos -> do
+    assertMsg "record: position from wrong epoch" (pos.epochNumber == epochNumber)
+    assertMsg "record: position from wrong vault" (pos.operator == operator)) positions
+  mapA_ (\r -> do
+    assertMsg "record: receipt from wrong epoch" (r.epochNumber == epochNumber)
+    assertMsg "record: receipt from wrong vault" (r.operator == operator)
+    assertMsg "record: receipt premium must be positive" (r.premiumPaidUsdc > 0.0)) receipts
+
+  let depositors = map (.depositor) positions
+  -- A depositor with two positions in one epoch would double-count in the aggregate
+  -- and in the per-depositor fan-out.
+  assertMsg "record: duplicate depositors" (unique depositors)
+
+  -- The positions handed in must account for the entire pool. This is what stops an
+  -- operator from omitting a depositor to shrink the report.
+  let totalNotionalCbtc = sum (map (.principalCbtc) positions)
+  assertMsg "record: positions do not account for the pool"
+    (totalNotionalCbtc == totalPooledCbtc)
+
+  -- Every depositor must have exactly one receipt, and the receipt set must match the
+  -- position set exactly.
+  assertMsg "record: receipt count != depositor count"
+    (length receipts == length positions)
+  assertMsg "record: receipts do not match depositors"
+    (sort (map (.depositor) receipts) == sort depositors)
+
+  pure (depositors, totalNotionalCbtc, sum (map (.premiumPaidUsdc) receipts))

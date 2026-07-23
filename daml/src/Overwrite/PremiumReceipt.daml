@@ -1,0 +1,14 @@
+-- Per-depositor payout record for the privacy-preserving fan-out. Each depositor
+-- sees only their own receipt; there is no cross-depositor payout list anywhere.
+module Overwrite.PremiumReceipt where
+
+template PremiumReceipt
+  with
+    operator : Party
+    depositor : Party
+    epochNumber : Int
+    premiumPaidUsdc : Decimal
+    transferRef : Text
+  where
+    signatory operator
+    observer depositor

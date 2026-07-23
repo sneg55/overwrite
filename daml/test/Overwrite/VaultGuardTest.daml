@@ -1,0 +1,151 @@
+-- Vault-specific negative tests split from EdgeCaseTest to keep modules compact.
+module Overwrite.VaultGuardTest where
+
+import DA.Time (addRelTime, hours, seconds)
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.Types
+import Overwrite.Vault
+import Overwrite.TestBase
+
+-- The pool handed to LockCollateral must equal what depositors actually deposited.
+-- An operator that allocates less than the pool must be rejected.
+testLockUnderCoveredPoolRejected : Script ()
+testLockUnderCoveredPoolRejected = do
+  p <- setupParties
+  vaultCid <- submit p.operator do
+    createCmd Vault with
+      operator = p.operator
+      oracleParty = p.oracle
+      epochNumber = 1
+      windowState = Open
+      strikePct = 0.05
+      premiumSplitPct = 1.0
+      cashInstrument = "mUSDC"
+      maxObservationAge = hours 1
+      settleBufferSeconds = hours 1
+      totalPooledCbtc = 0.0
+      minDepositCbtc = 0.01
+
+  aliceCbtc <- submit p.operator do
+    createCmd Holding with
+      issuer = p.operator; owner = p.alice; instrument = "CBTC"; amount = 1.0
+  (vaultCid, _) <- submitMulti [p.operator, p.alice] [] do
+    exerciseCmd vaultCid Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None
+
+  -- Operator mints a SMALLER holding and tries to pass it off as the pool.
+  shortPool <- submit p.operator do
+    createCmd Holding with
+      issuer = p.operator; owner = p.operator; instrument = "CBTC"; amount = 0.4
+
+  (requestedAt, allocateBefore, settleBefore) <- lockWindow
+  submitMustFail p.operator do
+    exerciseCmd vaultCid LockCollateral with
+      cbtcPoolCid = shortPool; mmBuyer = p.mmBuyer; factoryCid = p.factory
+      allocContext = noContext; requestedAt; allocateBefore; settleBefore
+
+-- A deposit below the vault's minimum is rejected on the custodial path too,
+-- not only on the DepositInvite path.
+testDepositBelowMinimumRejected : Script ()
+testDepositBelowMinimumRejected = do
+  p <- setupParties
+  vaultCid <- submit p.operator do
+    createCmd Vault with
+      operator = p.operator
+      oracleParty = p.oracle
+      epochNumber = 1
+      windowState = Open
+      strikePct = 0.05
+      premiumSplitPct = 1.0
+      cashInstrument = "mUSDC"
+      maxObservationAge = hours 1
+      settleBufferSeconds = hours 1
+      totalPooledCbtc = 0.0
+      minDepositCbtc = 0.01
+
+  dust <- submit p.operator do
+    createCmd Holding with
+      issuer = p.operator; owner = p.alice; instrument = "CBTC"; amount = 0.001
+
+  -- Both controllers (operator, depositor) authorize the submission so the
+  -- rejection proves the minimum-deposit guard, not a missing-authority error.
+  submitMultiMustFail [p.operator, p.alice] [] do
+    exerciseCmd vaultCid Deposit with depositor = p.alice; cbtcCid = dust; topUpPositionCid = None
+
+-- The settlement-window buffer must be positive: a Vault with a non-positive
+-- settleBufferSeconds fails `ensure`. LockCollateral requires
+-- settleBefore >= allocateBefore + settleBufferSeconds, so a positive buffer is what
+-- makes that guard imply settleBefore > allocateBefore.
+testSettleBufferMustBePositive : Script ()
+testSettleBufferMustBePositive = do
+  p <- setupParties
+  submitMustFail p.operator do
+    createCmd Vault with
+      operator = p.operator
+      oracleParty = p.oracle
+      epochNumber = 1
+      windowState = Open
+      strikePct = 0.05
+      premiumSplitPct = 1.0
+      cashInstrument = "mUSDC"
+      maxObservationAge = hours 1
+      settleBufferSeconds = seconds (-1)
+      totalPooledCbtc = 0.0
+      minDepositCbtc = 0.01
+
+-- The settlement window is now a choice argument rather than something Daml picks
+-- with getTime (the registry's choice context has to be fetched for the exact
+-- arguments the submission carries). That moves three bounds from "unreachable by
+-- construction" to "enforced by a guard", so each one gets a negative test.
+--
+-- Shared setup: a vault holding exactly alice's 1.0 CBTC, and the matching pool, so
+-- every rejection below is the window guard and not a pool-mismatch error.
+lockableVault : Script (Parties, ContractId Vault, ContractId Holding)
+lockableVault = do
+  p <- setupParties
+  vault0 <- newVault p
+  aliceCbtc <- makeHolding p.cbtcIssuer p.alice "CBTC" 1.0
+  (vault1, _) <- submitMulti [p.operator, p.alice] [] do
+    exerciseCmd vault0 Deposit with depositor = p.alice; cbtcCid = aliceCbtc; topUpPositionCid = None
+  pool <- consolidateCbtc p.operator
+  pure (p, vault1, pool)
+
+-- A postdated requestedAt would let the operator claim the allocation was requested
+-- later than it was, so the guard requires requestedAt <= now.
+testLockRequestedAtInFutureRejected : Script ()
+testLockRequestedAtInFutureRejected = do
+  (p, vaultCid, pool) <- lockableVault
+  (_, allocateBefore, settleBefore) <- lockWindow
+  now <- getTime
+  submitMustFail p.operator do
+    exerciseCmd vaultCid LockCollateral with
+      cbtcPoolCid = pool; mmBuyer = p.mmBuyer; factoryCid = p.factory
+      allocContext = noContext; requestedAt = addRelTime now (hours 1)
+      allocateBefore; settleBefore
+
+-- An allocate window that has already closed would produce an allocation the
+-- registry could never accept, so the guard requires allocateBefore > now.
+testLockAllocateWindowClosedRejected : Script ()
+testLockAllocateWindowClosedRejected = do
+  (p, vaultCid, pool) <- lockableVault
+  now <- getTime
+  let staleAllocateBefore = addRelTime now (hours (-1))
+  submitMustFail p.operator do
+    exerciseCmd vaultCid LockCollateral with
+      cbtcPoolCid = pool; mmBuyer = p.mmBuyer; factoryCid = p.factory
+      allocContext = noContext; requestedAt = now
+      allocateBefore = staleAllocateBefore
+      settleBefore = addRelTime staleAllocateBefore (hours 1)
+
+-- The caller cannot shrink the vault's configured settlement slack: settleBefore
+-- must be at least allocateBefore + settleBufferSeconds (hours 1 for this vault).
+testLockSettleBufferTooTightRejected : Script ()
+testLockSettleBufferTooTightRejected = do
+  (p, vaultCid, pool) <- lockableVault
+  (requestedAt, allocateBefore, _) <- lockWindow
+  submitMustFail p.operator do
+    exerciseCmd vaultCid LockCollateral with
+      cbtcPoolCid = pool; mmBuyer = p.mmBuyer; factoryCid = p.factory
+      allocContext = noContext; requestedAt; allocateBefore
+      settleBefore = addRelTime allocateBefore (seconds 1)

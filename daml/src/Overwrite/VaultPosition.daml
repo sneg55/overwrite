@@ -1,0 +1,95 @@
+-- One per depositor per active epoch. Principal-only: premium is delivered as a
+-- real transfer (see PayoutPremium), never accrued as a mutable balance. The
+-- depositor is the sole observer, so each depositor sees only their own position.
+module Overwrite.VaultPosition where
+
+import Overwrite.Allocation (Holding, Transfer(..))
+import Overwrite.PremiumReceipt
+import Overwrite.SettlementReceipt
+
+template VaultPosition
+  with
+    operator : Party
+    depositor : Party
+    principalCbtc : Decimal
+    epochNumber : Int
+    withdrawQueued : Bool
+    cashInstrument : Text   -- the instrument premium must be paid in (e.g. "mUSDC")
+  where
+    signatory operator
+    observer depositor
+    ensure principalCbtc > 0.0
+
+    -- Depositor queues a withdrawal; principal is returned at the epoch boundary.
+    choice QueueWithdraw : ContractId VaultPosition
+      controller depositor
+      do create this with withdrawQueued = True
+
+    -- Operator pushes the depositor's pro-rata premium (a real USDCx transfer)
+    -- and writes the receipt. Nonconsuming: the principal position persists.
+    -- `usdcCid` is an operator-owned holding of exactly `premiumUsdc`.
+    nonconsuming choice PayoutPremium : (ContractId Holding, ContractId PremiumReceipt)
+      with
+        premiumUsdc : Decimal
+        usdcCid : ContractId Holding
+        transferRef : Text
+      controller operator
+      do
+        paid <- fetch usdcCid
+        assertMsg "payout: holding owned by operator" (paid.owner == operator)
+        assertMsg "payout: wrong instrument" (paid.instrument == cashInstrument)
+        assertMsg "payout: amount matches premium" (paid.amount == premiumUsdc)
+        holdingCid <- exercise usdcCid Transfer with newOwner = depositor
+        receiptCid <- create PremiumReceipt with
+          operator
+          depositor
+          epochNumber
+          premiumPaidUsdc = premiumUsdc
+          transferRef
+        pure (holdingCid, receiptCid)
+
+    -- Roll a non-withdrawing position into the next epoch (principal unchanged).
+    choice RollOver : ContractId VaultPosition
+      controller operator
+      do
+        assertMsg "rollover: not for withdrawing positions" (not withdrawQueued)
+        create this with epochNumber = epochNumber + 1
+
+    -- Return principal CBTC to a withdrawing depositor at the epoch boundary.
+    -- `cbtcCid` is an operator-owned CBTC holding of exactly `principalCbtc`.
+    choice ReturnPrincipal : ContractId Holding
+      with
+        cbtcCid : ContractId Holding
+      controller operator
+      do
+        assertMsg "return: only for withdrawing positions" withdrawQueued
+        h <- fetch cbtcCid
+        assertMsg "return: holding owned by operator" (h.owner == operator)
+        assertMsg "return: amount matches principal" (h.amount == principalCbtc)
+        exercise cbtcCid Transfer with newOwner = depositor
+
+    -- The epoch's call was exercised, so this position's CBTC was sold at the
+    -- strike. Pay the depositor their pro-rata proceeds in cash and close the
+    -- position. There is no CBTC left to roll or to return, which is why this
+    -- is consuming and why RollOver and ReturnPrincipal must never run on the
+    -- ITM path. Mirrors PayoutPremium's transfer-then-receipt shape.
+    choice CloseWithProceeds : (ContractId Holding, ContractId SettlementReceipt)
+      with
+        proceedsUsdc : Decimal
+        usdcCid : ContractId Holding
+        transferRef : Text
+      controller operator
+      do
+        paid <- fetch usdcCid
+        assertMsg "close: holding owned by operator" (paid.owner == operator)
+        assertMsg "close: wrong instrument" (paid.instrument == cashInstrument)
+        assertMsg "close: amount matches proceeds" (paid.amount == proceedsUsdc)
+        holdingCid <- exercise usdcCid Transfer with newOwner = depositor
+        receiptCid <- create SettlementReceipt with
+          operator
+          depositor
+          epochNumber
+          principalCbtc
+          proceedsUsdc
+          transferRef
+        pure (holdingCid, receiptCid)

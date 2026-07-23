@@ -1,0 +1,149 @@
+-- The weekly covered call: the gap-filling option primitive. Only the writer
+-- (operator) and buyer (mmBuyer) see it, so the book is confidential. Collateral
+-- is a CIP-56 allocation carried by cid; this template never re-implements locking.
+module Overwrite.CallOption where
+
+import DA.Time (RelTime, subTime)
+
+import Overwrite.Allocation
+import Overwrite.EpochSettlement
+import Overwrite.PriceObservation
+import Overwrite.Types
+import qualified Splice.Api.Token.AllocationV1 as TA
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+template CallOption
+  with
+    operator : Party
+    mmBuyer : Party
+    oracleParty : Party        -- the ONLY oracle whose observations settle this option
+    notionalCbtc : Decimal
+    strikeUsdcPerCbtc : Decimal
+    premiumUsdc : Decimal
+    cashInstrument : Text       -- e.g. "mUSDC"; premium + strike must be this asset
+    collateralAllocationCid : ContractId TA.Allocation
+    epochNumber : Int
+    expiry : Time
+    maxObservationAge : RelTime
+    state : OptionState
+  where
+    -- mmBuyer co-signs so SettleITM (controller operator) carries {operator, mmBuyer}
+    -- authority. The real Allocation_ExecuteTransfer is controlled by
+    -- [executor, sender, receiver]: the CBTC leg needs [operator, operator, mmBuyer]
+    -- and the cash leg needs [operator, mmBuyer, operator]. Both are covered by
+    -- {operator, mmBuyer}, so both legs settle atomically in one transaction.
+    signatory operator, mmBuyer
+    ensure notionalCbtc > 0.0 && strikeUsdcPerCbtc > 0.0
+
+    -- Buyer pays the premium; it lands in the vault atomically with activation.
+    -- `premiumCid` is a buyer-owned holding of exactly `premiumUsdc` cash.
+    choice PayPremium : ContractId CallOption
+      with
+        premiumCid : ContractId Holding
+      controller mmBuyer
+      do
+        assertMsg "premium: option must be Written" (state == Written)
+        paid <- fetch premiumCid
+        assertMsg "premium: owned by buyer" (paid.owner == mmBuyer)
+        assertMsg "premium: wrong instrument" (paid.instrument == cashInstrument)
+        assertMsg "premium: amount matches" (paid.amount == premiumUsdc)
+        _ <- exercise premiumCid Transfer with newOwner = operator
+        create this with state = Active
+
+    -- OTM: price <= strike at expiry. Collateral is withdrawn back to the vault.
+    -- Withdraw is controlled by the executor (operator), so operator alone settles.
+    -- The result carries the recovered CBTC holding(s) back to the sender (operator).
+    choice SettleOTM : (TA.Allocation_WithdrawResult, ContractId EpochSettlement)
+      with
+        obsCid : ContractId PriceObservation
+        -- The registry's off-ledger choice context for the collateral withdraw.
+        -- Locally the mock allocation ignores it, so the sandbox passes `noContext`.
+        cbtcContext : ExtraArgs
+      controller operator
+      do
+        assertMsg "settle: option must be Active" (state == Active)
+        obs <- fetch obsCid
+        now <- getTime
+        checkObservation obs oracleParty epochNumber expiry maxObservationAge now
+        assertMsg "OTM guard: price <= strike" (obs.price <= strikeUsdcPerCbtc)
+        withdrawn <- exercise collateralAllocationCid (TA.Allocation_Withdraw with extraArgs = cbtcContext)
+        settlementCid <- create EpochSettlement with
+          operator
+          mmBuyer
+          epochNumber
+          settlementPath = OTM
+          observedPrice = obs.price
+          strikeUsdcPerCbtc
+          notionalCbtc
+          premiumUsdc
+          collateralReturned = True
+          tsSettled = now
+        pure (withdrawn, settlementCid)
+
+    -- ITM: price > strike. Atomic DvP: collateral to buyer, cash to vault, in one
+    -- transaction. `cashAllocationCid` is the buyer's allocated strike payment.
+    -- Returns both execute-transfer results (delivered holdings live in their
+    -- receiverHoldingCids: CBTC -> mmBuyer, cash -> operator).
+    choice SettleITM : (TA.Allocation_ExecuteTransferResult, TA.Allocation_ExecuteTransferResult, ContractId EpochSettlement)
+      with
+        obsCid : ContractId PriceObservation
+        cashAllocationCid : ContractId TA.Allocation
+        -- One choice context per leg, fetched from the registry for that specific
+        -- allocation. They are separate fields because the two legs are separate
+        -- allocations with separate contexts: today the CBTC leg can be a real
+        -- registry allocation while the cash leg is still mock USDC (which ignores
+        -- its context), and a real cash instrument later needs its own context
+        -- without changing this signature again.
+        cbtcContext : ExtraArgs
+        cashContext : ExtraArgs
+      controller operator
+      do
+        assertMsg "settle: option must be Active" (state == Active)
+        obs <- fetch obsCid
+        now <- getTime
+        checkObservation obs oracleParty epochNumber expiry maxObservationAge now
+        assertMsg "ITM guard: price > strike" (obs.price > strikeUsdcPerCbtc)
+        -- Validate the cash leg BEFORE moving either leg: right sender, asset,
+        -- executor, and exact strike payment, read from the allocation's interface
+        -- view. Otherwise the CBTC leg could deliver against an underpaid or
+        -- wrong-asset cash allocation.
+        cashView <- view <$> fetch cashAllocationCid
+        assertMsg "cash leg: wrong owner"
+          (cashView.allocation.transferLeg.sender == mmBuyer)
+        assertMsg "cash leg: wrong instrument"
+          (cashView.allocation.transferLeg.instrumentId.id == cashInstrument)
+        assertMsg "cash leg: wrong executor"
+          (cashView.allocation.settlement.executor == operator)
+        assertMsg "cash leg: amount != strike * notional"
+          (cashView.allocation.transferLeg.amount == strikeUsdcPerCbtc * notionalCbtc)
+        assertMsg "cash leg: wrong receiver"
+          (cashView.allocation.transferLeg.receiver == operator)
+        -- Both legs settle in ONE transaction. Each allocation's receiver is checked
+        -- before execution, so there is no receiver argument.
+        deliveredCbtc <- exercise collateralAllocationCid (TA.Allocation_ExecuteTransfer with extraArgs = cbtcContext)
+        deliveredCash <- exercise cashAllocationCid (TA.Allocation_ExecuteTransfer with extraArgs = cashContext)
+        settlementCid <- create EpochSettlement with
+          operator
+          mmBuyer
+          epochNumber
+          settlementPath = ITM
+          observedPrice = obs.price
+          strikeUsdcPerCbtc
+          notionalCbtc
+          premiumUsdc
+          collateralReturned = False
+          tsSettled = now
+        pure (deliveredCbtc, deliveredCash, settlementCid)
+
+-- Settlement never trusts an off-ledger number: it must come from the configured
+-- oracle, match (asset, epoch), be observed at/after expiry but not in the future,
+-- and be fresh. Settlement itself cannot run before expiry.
+checkObservation : PriceObservation -> Party -> Int -> Time -> RelTime -> Time -> Update ()
+checkObservation obs oracleParty epochNumber expiry maxObservationAge now = do
+  assertMsg "observation: wrong oracle" (obs.oracleParty == oracleParty)
+  assertMsg "observation: wrong asset" (obs.asset == "CBTC")
+  assertMsg "observation: wrong epoch" (obs.epochNumber == epochNumber)
+  assertMsg "settle: before expiry" (now >= expiry)
+  assertMsg "observation: before expiry" (obs.observedAt >= expiry)
+  assertMsg "observation: in the future" (obs.observedAt <= now)
+  assertMsg "observation: stale" (subTime now obs.observedAt <= maxObservationAge)

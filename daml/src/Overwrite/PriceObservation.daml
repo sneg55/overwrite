@@ -1,0 +1,33 @@
+-- The oracle's signed price. Immutable; settlement reads it by cid so no
+-- off-ledger number is trusted. The operator is an observer so settlement choices
+-- (run by the operator) can fetch it.
+module Overwrite.PriceObservation where
+
+template PriceObservation
+  with
+    oracleParty : Party
+    operator : Party
+    asset : Text
+    epochNumber : Int
+    price : Decimal      -- USD per unit of asset
+    source : Text        -- feed / API label (trust model)
+    observedAt : Time
+    isDemo : Bool        -- True when operator-injected to force a recorded path
+  where
+    signatory oracleParty
+    observer operator
+    ensure price > 0.0
+
+    -- Publish a corrected or fresher price for the same (asset, epoch). Consuming, so
+    -- the superseded observation is archived and can never be fetched by a settle
+    -- choice. LF 2 has no contract keys, so this is how "the latest observation wins"
+    -- is enforced on-ledger rather than by the caller's choice of cid.
+    choice Revise : ContractId PriceObservation
+      with
+        newPrice : Decimal
+        newObservedAt : Time
+      controller oracleParty
+      do
+        assertMsg "revise: price must be positive" (newPrice > 0.0)
+        assertMsg "revise: must not go backwards" (newObservedAt >= observedAt)
+        create this with price = newPrice, observedAt = newObservedAt

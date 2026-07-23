@@ -1,0 +1,31 @@
+{
+  "$schema": "../node_modules/testreel/recording-definition.schema.json",
+  "url": "http://localhost:3000/app/position",
+  "viewport": { "width": 1280, "height": 720 },
+  "colorScheme": "dark",
+  "outputFormat": "mp4",
+  "cookies": [
+    { "name": "overwrite-party", "value": "alice", "domain": "localhost", "path": "/" }
+  ],
+  "cursor": {
+    "enabled": true,
+    "size": 26,
+    "color": "#f7931a",
+    "rippleColor": "#ffb454",
+    "rippleSize": 44,
+    "idleHide": false,
+    "transitionMs": 650
+  },
+  "steps": [
+    { "action": "wait", "ms": 2000 },
+    { "action": "click", "selector": "#amountCbtc" },
+    { "action": "type", "selector": "#amountCbtc", "text": "0.5", "delay": 220 },
+    { "action": "wait", "ms": 1200 },
+    { "action": "click", "selector": "button:has-text(\"Review deposit\")" },
+    { "action": "wait", "ms": 2600 },
+    { "action": "click", "selector": "button:has-text(\"Confirm deposit\")" },
+    { "action": "wait", "ms": 3200 },
+    { "action": "scroll", "y": 320 },
+    { "action": "wait", "ms": 2400 }
+  ]
+}

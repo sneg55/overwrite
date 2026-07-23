@@ -1,0 +1,25 @@
+-- Consolidation must hold well above the 10-UTXO soft limit, not merely at the
+-- 3-holding case EdgeCaseTest.testConsolidation already covers. Split into its
+-- own module so EdgeCaseTest stays under the 300-line file-size hook.
+module Overwrite.ConsolidationTest where
+
+import DA.Action (foldlA)
+import DA.List (head, tail)
+import Daml.Script
+
+import Overwrite.Allocation
+import Overwrite.TestBase
+
+testConsolidationAboveSoftLimit : Script ()
+testConsolidationAboveSoftLimit = do
+  p <- setupParties
+  cids <- forA [1 .. 11] (\_ ->
+    submit p.operator do
+      createCmd Holding with
+        issuer = p.operator; owner = p.operator; instrument = "CBTC"; amount = 0.1)
+  merged <- foldlA (\acc cid -> submit p.operator do exerciseCmd acc Merge with otherCid = cid)
+    (head cids) (tail cids)
+  h <- queryContractId p.operator merged
+  case h of
+    None -> abort "merged holding missing"
+    Some holding -> assertMsg "11 UTXOs consolidate to 1.1 CBTC" (holding.amount == 1.1)
