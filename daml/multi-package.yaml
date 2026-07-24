@@ -1,6 +1,6 @@
 # Multi-package build: templates package + test package.
-# `daml build --all` builds `overwrite` (templates, deployable) then
-# `overwrite-test` (Daml Script, which data-depends on the templates DAR).
+# `overwrite-vault` (templates, deployable) must build before `overwrite-test`
+# (Daml Script), which data-depends on the templates DAR.
 packages:
   - .
   - ./test

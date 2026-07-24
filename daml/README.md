@@ -1,137 +1,104 @@
-# daml
+# Daml: the on-chain product
 
-Daml package `overwrite`: the on-chain product.
+Two packages, declared in `multi-package.yaml`:
 
-## SDK + package layout
+- **`overwrite-vault`** (this directory, `src/`) version 1.2.0: the templates, and the
+  only DAR that goes to devnet. It has no `daml-script` dependency, so the deployable
+  artifact stays lean.
+- **`overwrite-test`** (`test/`) version 0.1.0: the Daml Script suite. It data-depends
+  on the templates DAR, so build order matters.
 
-Daml **3.4.11** (latest stable 3.x), aligned with the devnet Canton 3.x line. Two
-packages (`multi-package.yaml`):
-
-- `overwrite` (this dir, `src/`): templates only. No `daml-script` dependency, so the
-  DAR uploaded to devnet stays lean.
-- `overwrite-test` (`test/`): the Daml Script proofs. Data-depends on the templates
-  DAR.
-
-Build order matters (templates first, tests second). The deprecated assistant's
-`daml build --all` is broken for multi-package, so build each explicitly:
+Daml SDK **3.4.11**, aligned with the devnet Canton 3.x line. The build needs a Java 17
+runtime (Canton is a JVM process); `daml build` alone does not, everything else does.
 
 ```bash
-daml build                 # from daml/       -> overwrite-<v>.dar (deployable)
-cd test && daml build      # from daml/test/  -> overwrite-test-<v>.dar
-cd test && daml test       # run the Script suite
+daml build                 # from daml/      -> overwrite-vault-1.2.0.dar (deployable)
+cd test && daml build      # from daml/test/ -> overwrite-test-0.1.0.dar
+cd test && daml test       # 55 tests
 ```
 
-## Implemented (all building + passing on SDK 3.4.11)
-
-Templates (`src/Overwrite/`):
-
-- `Allocation.daml`: shared allocation surface (`Holding` + `Allocation` with
-  `Allocate` / `ExecuteTransfer` / `Withdraw`, plus `Transfer` / `Merge` / `Split`
-  for deposits, consolidation, and premium chunking). One pair serves both legs.
-- `Vault.daml`: operator control contract (`Deposit`, `OfferDeposit`, `OpenDeposits`,
-  `LockCollateral`, `WriteCall`, `RecordEpoch`); mutable per-epoch state machine.
-- `VaultPosition.daml`: pro-rata claim (`QueueWithdraw`, `PayoutPremium`, `RollOver`,
-  `ReturnPrincipal`); principal-only, depositor-private.
-- `CallOption.daml`: the option primitive (`PayPremium`, `SettleOTM`, `SettleITM`
-  atomic DvP); reads a `PriceObservation` with asset/epoch/freshness guards.
-- `PriceObservation.daml` (with a `Revise` choice that archives the superseded
-  observation, so a settle choice fetching a live cid gets the latest price),
-  `EpochReport.daml` (aggregate), `PremiumReceipt.daml` (per-depositor),
-  `SettlementReceipt.daml` (per-depositor ITM close-out record). The self-custody
-  `DepositInvite` template lives inside `Vault.daml` (merged to break a type-level
-  import cycle), not its own file. Post-settlement rollover logic is in
-  `Rollover.daml`.
-
-Daml Script suite (`test/Overwrite/`), 30 tests all passing:
-
-- `AllocationTest`: allocation cycle + atomic DvP at the surface level (spikes 0.2/0.3).
-- `LifecycleTest`: full OTM path, full ITM path (atomic DvP), 3-depositor fan-out
-  (N receipts; aggregate report leaks no per-party list; a depositor cannot see
-  another's receipt); `RecordEpoch` derives its aggregates from ledger state.
-- `EdgeCaseTest`: deposit-outside-window, stale + wrong-epoch observation rejected,
-  withdraw returns principal and skips rollover, pool-coverage and deposit-minimum
-  guards.
-- `RolloverTest`: OTM roll (withdrawers paid principal, rest roll) and ITM
-  close-and-distribute (every position closes to pro-rata strike proceeds), including
-  the full-withdrawal and uneven-proceeds edge cases and the reject-OTM-branch-after-ITM
-  regression guard.
-- `ObservationTest`: `Revise` archives the predecessor; only the oracle may revise.
-- `ConsolidationTest`: consolidation above the 10-UTXO soft limit (11 UTXOs).
-- `SelfCustodyTest`: the `OfferDeposit` / `AcceptDeposit` propose-accept path.
+`daml build --all` is broken for multi-package under the deprecated assistant, so build
+each explicitly, templates first.
 
 ## Templates
 
-**5 core templates** (`src/Overwrite/`):
+Nine product templates across `src/Overwrite/`, plus three local stand-ins for the CBTC
+registry in `Allocation.daml` (`Holding`, `MockAllocation`, `MockAllocationFactory`).
 
-1. `Vault` (signatory `operator`): epoch counter + params, deposit window state,
-   pooled CBTC. Choices: `OpenDeposits`, `LockCollateral` (one
-   `AllocationFactory_Allocate` for the pool), `WriteCall`, `RecordEpoch`,
-   `OfferDeposit`. Archived + recreated each epoch; the cid changes every epoch.
-2. `VaultPosition` (signatory `operator`, observer `depositor`): principal-only
-   pro-rata claim. Choices: `QueueWithdraw` (depositor), `PayoutPremium`
-   (operator; pushes pro-rata cash + writes a `PremiumReceipt`, enforcing the cash
-   instrument), `RollOver`, `ReturnPrincipal`, and `CloseWithProceeds` (operator;
-   pays pro-rata strike proceeds and writes a `SettlementReceipt` when the epoch
-   settled ITM). `Vault.RollPositions` (in `Rollover.daml`) drives these at the
-   epoch boundary, branching on the settlement path: OTM returns principal in CBTC
-   and rolls; ITM closes every position to cash.
-3. `CallOption` (signatory `operator`, observer `mmBuyer`): the gap-filling option
-   primitive. Choices: `PayPremium`, `SettleOTM` (price <= strike;
-   `Allocation_Withdraw`), `SettleITM` (price > strike; `Allocation_ExecuteTransfer`
-   atomic DvP). Holds `collateralAllocationCid`; never re-implements locking.
-4. `PriceObservation` (signatory `oracleParty`): a signed price. Settlement reads it
-   by cid, keyed `(asset, epochNumber)`, with freshness + wrong-epoch guards. A
-   `Revise` choice republishes in place and archives the predecessor, so the latest
-   observation is the only one a settle choice can fetch (LF 2 has no contract keys).
-   Labeled `DEMO` when the operator injects a price for recorded paths.
-5. `EpochReport` (signatory `operator`, observer a single `depositor`): aggregate
-   results only, no per-holder payout list. `RecordEpoch` derives the aggregates
-   from the fetched positions and receipts (never operator-supplied totals) and
-   creates one copy per depositor, so the aggregate reaches everyone without
-   exposing the depositor set.
+Five templates are core: they hold the vault's state and drive the epoch. The other four
+are records, created once as evidence and never exercised again.
 
-**3 supporting contracts:**
+| Template | Core | Signatories | Purpose |
+|---|---|---|---|
+| `Vault` | yes | operator | Epoch counter, params (strike rule, premium split, observation freshness, minimum deposit), deposit-window state. CBTC is pooled in operator custody. Epoch cadence is a scheduler setting, not on-ledger. |
+| `VaultPosition` | yes | operator (observer: one depositor) | A depositor's principal-only CBTC claim for the epoch. Choices: `QueueWithdraw`, `PayoutPremium` (consolidation-aware), `RollOver`, `ReturnPrincipal`, `CloseWithProceeds`. |
+| `CallOption` | yes | operator (writer), mm-buyer | The written weekly call: notional, strike, expiry, premium. Choices: `PayPremium`, `SettleOTM`, `SettleITM`. |
+| `PriceObservation` | yes | oracle (observer: operator) | Asset, price, timestamp, source, demo flag. Read by settlement, keyed by `(asset, epoch)`. A `Revise` choice archives the superseded observation, so a settle choice fetching a live cid gets the latest price. |
+| `EpochReport` | yes | operator (observer: one depositor) | One copy per depositor per epoch, carrying aggregate results only. `RecordEpoch` derives those aggregates from fetched positions and receipts rather than operator-supplied totals, so the aggregate reaches everyone without exposing the depositor set. |
+| `PremiumReceipt` | | operator (observer: one depositor) | Evidence of a single premium transfer during fan-out. |
+| `SettlementReceipt` | | operator (observer: one depositor) | Per-depositor record of an ITM close-out (pro-rata proceeds). |
+| `EpochSettlement` | | operator, mm-buyer | The settled-epoch record: path, observed price, notional, premium. |
+| `DepositInvite` | | operator (observer: one depositor) | Propose and accept handle for self-custody deposits. Defined inside `Vault.daml` rather than its own module, to break a type-level import cycle. |
 
-- `PremiumReceipt` (signatory `operator`, observer the single `depositor`):
-  per-depositor premium payout record for the privacy-preserving fan-out.
-- `SettlementReceipt` (signatory `operator`, observer the single `depositor`):
-  per-depositor record of an ITM close-out (pro-rata strike proceeds).
-- `DepositInvite` (signatory `operator`, observer `depositor`, defined inside
-  `Vault.daml`): propose/accept handle for self-custody deposits (`AcceptDeposit`,
-  controller `depositor`).
+`Rollover.daml` is a logic module (post-settlement position lifecycle), split out of
+`Vault.daml` under the file-size rule. It holds no template.
 
-## Cash leg
+## Collateral rides the CIP-56 allocation surface
 
-`mock-usdc` package: `MockUsdcHolding` + a `MockUsdcAllocationFactory` implementing
-the **same** CIP-56 allocation interface as CBTC, so `SettleITM` composes both legs
-in one submission. Demo-only, labeled everywhere. Built regardless of whether a
-real devnet stable instrument turns up.
+Never a bespoke Daml lock. The templates import the vendored token-standard packages
+under `vendor/` and hold the real interface types: `CallOption` carries a
+`ContractId Allocation`, and `SettleITM` returns two `Allocation_ExecuteTransferResult`
+values. Both settlement legs ride that one interface, which is what lets `SettleITM`
+compose them atomically.
 
-## Test suite (`test/`)
+`Vault.LockCollateral` and `Vault.LockCollateralReal` take a
+`ContractId AllocationFactory` and exercise `AllocationFactory_Allocate` on whatever is
+passed in: the registry's factory on devnet, the local stand-in on the sandbox. The
+stand-in is an `interface instance` of the same vendored v1 packages, so it is a
+substitute implementation rather than a lookalike. It is still a stand-in. See the CBTC
+integration section of the [root README](../README.md) for what that does and does not
+prove.
 
-Daml Script, in-memory, the fast regression net. Covers full OTM + ITM paths,
-multi-depositor fan-out (N receipts, aggregate leaks no per-party list), and edge
-cases (withdraw-at-boundary, consolidation over the 10-UTXO soft limit, stale /
-wrong-epoch observation, deposit-outside-window).
+## The cash leg
 
-This suite is the fast regression net, not the whole gate: it cannot catch a choice
-signature change that leaves `scripts/` or the backend command builders stale. After
-any such change, run the live lifecycle checks in `scripts/sandbox.sh` (`demo` covers
-deposit through settle; `verify` / `verify-itm` reach the record-and-roll half;
-`verify-deposit` covers a deposit landing mid-window).
+There is no separate cash package. The strike leg uses the same `Holding` template with
+a different `instrument` string (`mUSDC`), and `VaultPosition.PayoutPremium` checks that
+string before it pays. One template and one allocation interface serve both legs, which
+is what lets `SettleITM` settle CBTC against cash in a single submission. The cash
+instrument is a demo instrument and is labeled as one everywhere it surfaces.
 
-## Init (once)
+## Privacy
 
-The package is pinned to Daml **3.4.11**. Install that SDK on a fresh checkout
-(the assistant auto-fetches it on first build, or run `daml install 3.4.11`):
+Enforced here, at the signatory and observer sets, never in the web layer. A
+`VaultPosition` is signed by the operator with that one depositor as its sole observer,
+so no depositor is a stakeholder of anyone else's position. Do not add a field or an
+observer that would widen this.
 
-```bash
-daml version        # 3.4.11
-daml build          # from daml/       -> deployable templates DAR
-cd test && daml build && daml test
-```
+## Tests
 
-Note: the classic `daml` assistant is deprecated in 3.4 in favor of DPM
-(Digital Asset Package Manager). Commands still work here; migrate to DPM later.
-When deploying to devnet, re-confirm the DAR's LF/protocol target is accepted by
-the devnet Canton (3.5.6).
+55 Daml Script tests across 11 files in `test/Overwrite/`:
+
+| Suite | Covers |
+|---|---|
+| `LifecycleTest` | Full OTM path, full ITM path (atomic DvP), multi-depositor fan-out (N receipts, aggregate report leaks no per-party list, no depositor sees another's receipt) |
+| `EdgeCaseTest` | Deposit outside the window, stale and wrong-epoch observations rejected, withdraw returns principal and skips rollover, pool-coverage and deposit-minimum guards |
+| `RolloverTest` | OTM roll (withdrawers paid principal, the rest roll), ITM close-and-distribute, full-withdrawal and uneven-proceeds edges, and the reject-OTM-after-ITM regression guard |
+| `VaultGuardTest` | Vault choice guards |
+| `AllocationTest` | Allocation cycle and atomic DvP at the interface level |
+| `DepositTopUpTest` | One position per depositor per epoch, topped up rather than duplicated |
+| `ConsolidationTest` | Consolidation above the 10-UTXO soft limit |
+| `ObservationTest` | `Revise` archives the predecessor; only the oracle may revise |
+| `SelfCustodyTest` | The `OfferDeposit` and `AcceptDeposit` propose-accept path |
+| `RealPathTest` | The real-registry code path against the local stand-in factory |
+
+They run in-memory against the same vendored CIP-56 interfaces and the local stand-in
+factory. That makes them the fast regression net, not proof against a live registry;
+for that see `scripts/devnet-vault-deposit`.
+
+### This suite is not the whole gate
+
+It cannot catch a choice signature change that leaves `scripts/` or the backend command
+builders stale. After any such change, run the live lifecycle checks in
+`scripts/sandbox.sh`: `demo` covers deposit through settle, `verify` and `verify-itm`
+reach the record-and-roll half that `demo` never touches, and `verify-deposit` covers a
+deposit landing mid-window. Picking the wrong one passes while proving nothing.

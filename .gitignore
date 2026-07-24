@@ -63,8 +63,13 @@ web/v2-hero.png
 web/v2-full.png
 
 # Demo video: the SOURCE (scenes.json, ui/*.json, cards/, the scripts) is committed,
-# the artefacts are not. Renders are reproducible from source with `npm run
-# cards && npm run tts && npm run build`, and the mp4s are tens of megabytes each.
+# the intermediate artefacts are not. Renders are reproducible from source with
+# `npm run cards && npm run tts && npm run build`, and the working mp4s are tens of
+# megabytes each.
 media/demo-src/out/
 media/demo-src/testreel-output/
 media/*.mp4
+# ...except the delivered demo video and its poster frame. Without them a reader has
+# no way to see the product at all: there is no deployed URL, and the README's own
+# honesty rails refer to what the video labels. 19MB, well inside GitHub's limit.
+!media/overwrite-demo-1.25x.mp4
