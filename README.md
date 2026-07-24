@@ -67,7 +67,7 @@ observations; settlement reads them on-ledger. Nobody passes a price in as an ar
 | `operator` | Runs epochs, coordinates settlement | Real (the app) |
 | `alice` / `bob` / `carol` | Depositors: deposit CBTC, receive pro-rata premium | Real (faucet CBTC) |
 | `mm-buyer` | Buys the weekly call, pays the premium | **SIMULATED**, labeled in UI and video |
-| `oracle` | Publishes BTC/USD price observations | Self-operated, real spot data from a public API, **labeled** |
+| `oracle` | Publishes BTC/USD price observations | Self-operated single feed: real public spot by default, demo runs can inject a price. Each observation records which. **Labeled** |
 | `observer` | Third party used for the privacy reveal | Real (shows an empty ledger view) |
 
 All demo parties are backend-owned and custodial. The web party switcher is a demo
@@ -80,36 +80,44 @@ behind a single ledger client, and the Daml package on the JSON Ledger API, plus
 parties and which of them are simulated](./media/schematics/architecture.png)
 
 ```
-daml/       Daml package `overwrite`: product templates + Daml Script test suite
+daml/       Daml package `overwrite-vault`: the deployable templates. The Daml Script
+            suite is a sibling package under `daml/test/`, deliberately not bundled
+            into the DAR that goes to devnet.
 backend/    TypeScript on the JSON Ledger API
 web/        Next.js 16 App Router (server components enforce the privacy reveal)
-scripts/    party setup, faucet funding, sandbox, demo/seed scenarios
-media/      demo video source + the schematics above (regenerate: npm run schematics)
+scripts/    party setup, faucet funding, sandbox, demo/seed scenarios, devnet proofs
+media/      demo video source + the schematics above (regenerate: `npm run schematics`
+            from `media/demo-src`)
 ```
 
 ### Daml (`daml/src/Overwrite/`)
 
 Nine product templates. Five are core, four are thin supporting contracts.
+`Overwrite.Allocation` adds three more (`Holding`, `MockAllocation`,
+`MockAllocationFactory`): local stand-ins for the CBTC registry, described under CBTC
+integration below.
 
 | Template | Signatories | Purpose |
 |---|---|---|
-| `Vault` | operator | Epoch counter, params (epoch length, strike rule, premium split), deposit-window state. CBTC is pooled in operator custody. |
-| `VaultPosition` | operator (observer: one depositor) | A depositor's principal-only CBTC claim for the epoch. Choices: `QueueWithdraw`, `PayoutPremium` (consolidation-aware). |
-| `CallOption` | vault (writer), mm (buyer) | The written weekly call: notional, strike, expiry, premium. Choices: `PayPremium`, `SettleOTM`, `SettleITM`. |
-| `PriceObservation` | oracle | Asset, price, timestamp. Read by settlement, keyed by `(asset, epoch)`. |
+| `Vault` | operator | Epoch counter, params (strike rule, premium split, observation freshness, minimum deposit), deposit-window state. CBTC is pooled in operator custody. Epoch cadence is a scheduler setting, not on-ledger. |
+| `VaultPosition` | operator (observer: one depositor) | A depositor's principal-only CBTC claim for the epoch. Choices: `QueueWithdraw`, `PayoutPremium` (consolidation-aware), `RollOver`, `ReturnPrincipal`, `CloseWithProceeds`. |
+| `CallOption` | operator (writer), mm-buyer | The written weekly call: notional, strike, expiry, premium. Choices: `PayPremium`, `SettleOTM`, `SettleITM`. |
+| `PriceObservation` | oracle (observer: operator) | Asset, price, timestamp, source, demo flag. Read by settlement, keyed by `(asset, epoch)`. |
 | `EpochReport` | operator (observer: one depositor) | One per depositor per epoch, carrying aggregate results only. No per-holder list. |
 | `PremiumReceipt` | operator (observer: one depositor) | Evidence of a single premium transfer during fan-out. |
 | `SettlementReceipt` | operator (observer: one depositor) | Per-depositor record of an ITM close-out (pro-rata proceeds). |
-| `EpochSettlement` | operator, mm | The settled-epoch record: path, observed price, notional, premium. |
-| `DepositInvite` | operator | Deposit onboarding for a party. |
+| `EpochSettlement` | operator, mm-buyer | The settled-epoch record: path, observed price, notional, premium. |
+| `DepositInvite` | operator (observer: one depositor) | Deposit onboarding for a party. |
 
 `Rollover` is a logic module (post-settlement position lifecycle), split out of
 `Vault.daml` under the file-size rule, not a template.
 
-Collateral is modeled through the **CIP-56 allocation surface** (`Allocate` /
-`ExecuteTransfer` / `Withdraw`), never a bespoke Daml lock. Both settlement legs ride
-that one interface, which is what lets `SettleITM` compose them atomically. See the
-CBTC integration section for the current binding status.
+Collateral rides the **CIP-56 allocation surface** (`Allocate` / `ExecuteTransfer` /
+`Withdraw`), never a bespoke Daml lock. The templates import the vendored token-standard
+packages under `daml/vendor/` and hold the real interface types: `CallOption` carries a
+`ContractId Allocation`, and `SettleITM` returns two `Allocation_ExecuteTransferResult`
+values. Both settlement legs ride that one interface, which is what lets `SettleITM`
+compose them atomically.
 
 ### Backend (`backend/src/`)
 
@@ -169,29 +177,49 @@ and `scripts/seed-demo` / `scripts/seed-vault` seed a demo epoch.
 | **Backend** | 217 unit tests across 37 files, each feature tested with the ledger client stubbed | `bun test`, all pass |
 | **Web** | 112 tests (ledger-view privacy, deposit/withdraw actions, party defaults, components) | `bun test`, all pass |
 
-The Daml Script suite is the fast in-memory regression net (it runs against the same
-CIP-56 allocation interface). A separate, smaller devnet integration check proves the
-real registry `AllocationFactory`.
+The Daml Script suite is the fast in-memory regression net: same vendored CIP-56
+interfaces, local stand-in factory. Two layers sit above it. Locally,
+`./scripts/sandbox.sh demo`, `verify`, `verify-itm` and `verify-deposit` drive full
+epochs through the real backend command builders against a Canton sandbox. On devnet,
+`scripts/devnet-lock` and `scripts/devnet-vault-deposit` exercise the real registry
+`AllocationFactory`, and `scripts/verify-dar` checks a DAR is both uploaded and vetted.
 
 ## CBTC integration
 
-- CBTC via the devnet faucet (`cbtc-faucet.bitsafe.finance`, a plain JSON API); holdings
-  and transfers via CIP-56. Demo party funding is scripted in `scripts/fund-parties`.
-- Option collateral is designed to lock through the CIP-56 allocation surface
+- CBTC via the devnet faucet (`cbtc-faucet.devnet.bitsafe.finance`, a plain JSON API; the
+  apex host still serves the web UI but its `/api` is dead). Holdings and transfers via
+  CIP-56. Demo party funding is scripted in `scripts/fund-parties`.
+- Option collateral locks through the CIP-56 allocation surface
   (`AllocationFactory_Allocate` with `allocateBefore` / `settleBefore` windows that map
   1:1 onto a weekly epoch). That surface is the token standard's own lock and DvP
   primitive, so the vault borrows it instead of inventing one.
 - The 10-UTXO soft limit per party is handled by consolidating holdings during deposit
   and premium fan-out (the cbtc-lib `check_and_consolidate` pattern).
-- **The package does not yet bind the real registry.**
-  `Overwrite.Allocation` declares local `Holding`, `MockAllocation`, and
-  `MockAllocationFactory` templates that mirror the CIP-56 v1 choice names. They are an
-  in-memory model, not a binding. Everything you can run today (the Daml Script suite,
-  the local sandbox demo) runs against that model.
-- The registry's allocation interfaces are confirmed present on devnet in two
-  incompatible versions. Which one CBTC binds, and whether a real CBTC holding can be
-  allocated end to end, is still an open question. Until it is settled, treat "runs
-  against the real registry" as unproven.
+- **The factory is a parameter, so one choice body serves both ledgers.**
+  `Vault.LockCollateral` and `Vault.LockCollateralReal` take a
+  `ContractId AllocationFactory` and exercise `AllocationFactory_Allocate` on whatever is
+  passed in: the registry's factory on devnet, a local stand-in on the sandbox. That
+  stand-in (`Overwrite.Allocation`) is an `interface instance` of the same vendored v1
+  packages, so it is a substitute implementation rather than a lookalike, but it is still
+  a stand-in: the Daml Script suite and the sandbox demo run against it.
+- **Deposit and collateral lock are proven live on devnet, through the vault
+  (2026-07-22).** `scripts/devnet-vault-deposit` moved real CBTC from a depositor into
+  operator custody via the registry's `TransferFactory_Transfer` (a two-step offer and
+  accept), recorded the position with `Vault.RecordDeposit`, and locked the pool with
+  `Vault.LockCollateralReal`, which produced a real registry `DvpLegAllocation`. It runs
+  the backend's own code paths under `USE_REAL_REGISTRY`, not a script-local
+  reimplementation. Transcript and contract ids in
+  [the implementation notes](./docs/superpowers/specs/2026-07-21-real-cbtc-vault-integration-design-implementation-notes.md).
+- **Not devnet-proven: write, premium fan-out, settlement.** Those halves of the epoch run
+  on the local sandbox and in the Daml Script suite. One known gap: a live registry may
+  answer an allocation with `Pending` (a two-step allocation instruction) where the local
+  factory always completes synchronously. The vault aborts on `Pending` rather than
+  pretending it completed, and handling that path is not built.
+- The v1-vs-v2 allocation API question is settled. Both versions are vetted on the
+  devnet participant, but the CBTC registry binds v1 (`Allocation_ExecuteTransfer`): every
+  `splice-api-token-*` package inside the registry's own utilities bundle is v1 1.0.0 and
+  the v2 package appears nowhere in it, which the live allocation then confirmed.
+  `daml/vendor/` pins those v1 packages by content hash.
 - Never touches mint/burn (institution-gated). Recipients off-ramp via venues
   (Temple / OneSwap / Bron), not via redemption.
 
@@ -201,7 +229,11 @@ These are non-negotiable and baked into the UI, video, and this README:
 
 - **No unsecured counterparty exposure: collateral is locked on-chain.** Not
   "counterparty-risk-free."
-- The **market maker and oracle are SIMULATED** and labeled everywhere.
+- The **market maker is SIMULATED** and labeled everywhere it appears.
+- The **price feed is operator-run**, not a production oracle: one party, one source. It
+  polls real public spot by default, and demo runs inject a price to force an ITM epoch.
+  `PriceObservation` records which one produced it (`source`, `isDemo`), so the ledger
+  itself says whether a settlement was driven by a real print or a demo one.
 - Premium figures are **demo parameters, not market pricing**. No APY or yield claims
   anywhere in this interface.
 
