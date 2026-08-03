@@ -30,6 +30,10 @@ services:
       # A visitor can pause the engine from the operator control room. Resume it if the
       # pause outlives a plausible attention span.
       OVERWRITE_AUTO_RESUME_SECONDS: "600"
+      # The oracle leaks one PriceObservation per poll (it never archives the one it
+      # supersedes), so the poll interval sets how fast the ledger grows. See the note in
+      # deploy/entrypoint.sh.
+      OVERWRITE_ORACLE_POLL_MS: "15000"
       _JAVA_OPTIONS: "-Xms512m -Xmx3g -XX:+ExitOnOutOfMemoryError"
 
     # This box also serves a production CRM. A Canton heap that runs away must fail its

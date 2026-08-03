@@ -77,6 +77,9 @@ boot() {
   mkdir -p "$STATE_DIR"
 
   log "starting Canton sandbox"
+  # Raises the JSON API's 200-element list cap. Without this the engine wedges about ten
+  # minutes in: every ACS read 413s and the scheduler ticks forever without dispatching.
+  export CANTON_CONFIG=/app/deploy/canton-demo.conf
   ./scripts/sandbox.sh start
 
   # Synchronizer-connected is not the same as package-vetted: a create referencing
@@ -88,6 +91,19 @@ boot() {
   # interactive thing a visitor can do is dead on arrival.
   log "seeding vault + funded depositor wallets"
   SEED_FUND_WALLETS=1 ./scripts/sandbox.sh seed-vault
+
+  # The seed writes a demo clock tuned for a run that lasts minutes, and every process
+  # sources that file with `set -a`, so container env alone cannot override it. Patch the
+  # file the seed just wrote.
+  #
+  # The oracle creates a PriceObservation per poll and never archives one, so a 3s poll
+  # mints 20 contracts a minute: 7200 over a six hour window, every one of them re-read on
+  # every 2s scheduler tick across ten template queries. Slowing the poll cuts that by the
+  # same factor it slows the price ticker, which at 15s is still live to a visitor.
+  if [ -n "${OVERWRITE_ORACLE_POLL_MS:-}" ]; then
+    sed -i "s/^ORACLE_POLL_MS=.*/ORACLE_POLL_MS=${OVERWRITE_ORACLE_POLL_MS}/" "$STATE_DIR/demo.env"
+    log "oracle poll set to ${OVERWRITE_ORACLE_POLL_MS}ms for the hosted run"
+  fi
 
   log "starting engine (scheduler + oracle + mm)"
   ./scripts/sandbox.sh engine

@@ -79,8 +79,21 @@ cmd_start() {
   # collisions but never handed to the sandbox, so the guard was inspecting ports the
   # script did not control: overriding GRPC_PORT moved the check and not the binding,
   # and Canton took 6865/6866 anyway.
+  # CANTON_CONFIG: optional HOCON overrides merged into the sandbox's generated config.
+  # Unset for local development, so nothing here changes. The shared demo sets it to
+  # raise the JSON API's 200-element list cap, which a long-running ledger crosses and
+  # which wedges every ACS read once it does (see deploy/canton-demo.conf).
+  local cfg_arg=()
+  if [ -n "${CANTON_CONFIG:-}" ]; then
+    if [ ! -f "$CANTON_CONFIG" ]; then
+      echo "ERROR: CANTON_CONFIG=$CANTON_CONFIG does not exist" >&2
+      return 1
+    fi
+    cfg_arg=(-c "$CANTON_CONFIG")
+    echo "  canton config: $CANTON_CONFIG"
+  fi
   ( cd "$DAML_DIR" && exec daml sandbox --port "$GRPC_PORT" --admin-api-port "$ADMIN_PORT" \
-      --json-api-port "$JSON_PORT" --dar "$DAR" ) \
+      --json-api-port "$JSON_PORT" --dar "$DAR" "${cfg_arg[@]}" ) \
     >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
   echo -n "waiting for JSON API + synchronizer on :$JSON_PORT "

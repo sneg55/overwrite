@@ -65,6 +65,7 @@ RUN cd web && bun run build
 # The demo's own knobs. Every one is overridable from the compose file.
 ENV OVERWRITE_RESET_INTERVAL_MINUTES=360
 ENV OVERWRITE_AUTO_RESUME_SECONDS=600
+ENV OVERWRITE_ORACLE_POLL_MS=15000
 ENV BACKEND_PORT=3001
 ENV WEB_PORT=3000
 # Canton wants a real heap. Left unset, the JVM takes ~25% of container RAM and the
