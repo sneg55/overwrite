@@ -1,0 +1,34 @@
+# Build context for deploy/Dockerfile. Keep it to what the image actually builds
+# from: sources, the vendored + baseline DARs, and the scripts the entrypoint drives.
+#
+# .env is excluded on purpose. The container is configured by the env the seed writes
+# into .sandbox/demo.env at boot, so a devnet .env copied into the image would only be
+# a secret sitting in a layer for no reason.
+
+.git
+.github
+node_modules
+**/node_modules
+web/.next
+dist
+**/.daml/
+.sandbox
+.harness
+.impeccable
+.superpowers
+.claude
+.worktrees
+
+# Local secrets and machine state
+.env
+.env.*
+!.env.example
+
+# Not needed to run the demo
+media
+docs
+plans
+product-critic-output
+appsfactory-agent
+*.log
+.DS_Store
