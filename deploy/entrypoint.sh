@@ -158,7 +158,16 @@ if ((next - now < 600)); then next=$((next + INTERVAL_SEC)); fi
 wait_sec=$((next - now))
 log "next wipe in ${wait_sec}s ($(date -u -d "@$next" +'%Y-%m-%dT%H:%M:%SZ')), every ${INTERVAL_MIN} min"
 
-sleep "$wait_sec"
+# Backgrounded and waited on, NOT a plain `sleep`. Bash runs a trap only between
+# commands, so a foreground sleep defers SIGTERM until it returns: with a 6 hour
+# interval that made the handler above dead code, and `docker stop` fell through to
+# SIGKILL after the grace period with Canton still running. `wait` is interruptible, so
+# the signal lands while we are parked here. Verified 2026-08-03 by signalling pid 1 and
+# watching the container come back with a stop line in the log; before this change the
+# same signal did nothing at all.
+sleep "$wait_sec" &
+sleep_pid=$!
+wait "$sleep_pid" || true
 
 log "wipe boundary reached, exiting for a clean restart"
 stop_all
