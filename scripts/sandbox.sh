@@ -250,10 +250,15 @@ case "${1:-}" in
   web)            cmd_web ;;
   scheduler)      cmd_scheduler ;;
   seed-vault)     cmd_seed_vault ;;
+  # Exposed for the deploy entrypoint, which boots the same sequence the verify gates
+  # do and must not seed into the window where the synchronizer is connected but the
+  # overwrite package is not yet vetted. Exported rather than copied: a second copy of
+  # the poll would drift from this one.
+  wait-vetted)    wait_vetted ;;
   engine)         cmd_engine ;;
   engine-stop)    cmd_engine_stop ;;
   verify)         cmd_verify ;;
   verify-itm)     cmd_verify_itm ;;
   verify-deposit) cmd_verify_deposit ;;
-  *) echo "usage: $0 {start|stop|status|logs|demo|seed|serve|web|scheduler|seed-vault|engine|engine-stop|verify|verify-itm|verify-deposit}" >&2; exit 2 ;;
+  *) echo "usage: $0 {start|stop|status|logs|demo|seed|serve|web|scheduler|seed-vault|wait-vetted|engine|engine-stop|verify|verify-itm|verify-deposit}" >&2; exit 2 ;;
 esac

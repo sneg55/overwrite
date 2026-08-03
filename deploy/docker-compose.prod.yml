@@ -1,0 +1,59 @@
+# Overwrite shared demo on the veodyn box (overwrite.sawinyh.com).
+#
+# The box already runs cal.diy (127.0.0.1:3000), warpdrive (3001 + ws 8080), watanabe
+# (3100) and MinIO (9000) behind a native systemd Caddy that owns 80/443. This stack
+# follows the same shape: bind loopback only, let the host Caddy terminate TLS.
+#
+# Bring up:  cd /opt/overwrite-demo && docker compose -f deploy/docker-compose.prod.yml up -d --build
+# Logs:      docker compose -f deploy/docker-compose.prod.yml logs -f
+# Wipe now:  docker compose -f deploy/docker-compose.prod.yml restart
+
+services:
+  overwrite:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: overwrite-demo:latest
+    container_name: overwrite-demo
+
+    # Only the Next.js port is published, and only on loopback. The REST backend and the
+    # Canton JSON API stay inside the container: the browser never calls either one (the
+    # UI reads through server components and mutates through server actions), so
+    # publishing them would add public surface that nothing uses.
+    ports:
+      - "127.0.0.1:3200:3000"
+
+    environment:
+      # Round-clock wipe: 00:00, 06:00, 12:00, 18:00 UTC. The container exits at the
+      # boundary and this restart policy brings it back on a fresh in-memory ledger.
+      OVERWRITE_RESET_INTERVAL_MINUTES: "360"
+      # A visitor can pause the engine from the operator control room. Resume it if the
+      # pause outlives a plausible attention span.
+      OVERWRITE_AUTO_RESUME_SECONDS: "600"
+      _JAVA_OPTIONS: "-Xms512m -Xmx3g -XX:+ExitOnOutOfMemoryError"
+
+    # This box also serves a production CRM. A Canton heap that runs away must fail its
+    # own container rather than pushing warpdrive or cal.diy into the OOM killer.
+    mem_limit: 6g
+    cpus: 4.0
+
+    # Healthy only once Canton is up, packages are vetted, the seed has run and Next is
+    # serving. That whole chain is what start_period covers; the JVM boot alone is most
+    # of it.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3000/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
+    restart: unless-stopped
+    # Canton can take its time coordinating shutdown; the entrypoint's SIGTERM handler
+    # stops the engine and the sandbox before the container goes.
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

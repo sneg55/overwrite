@@ -144,6 +144,24 @@ async function main(): Promise<void> {
     poolPieces.push(cidOf(dep, 'Allocation', 'Holding'))
   }
 
+  // The hosted demo is writable, so a visitor must have something to deposit. Every
+  // holding minted above is spent into the opening positions, which leaves each
+  // depositor's wallet empty and the deposit form with nothing to select. Off by
+  // default: the verify gates read the wallet as a signal, and silently handing them a
+  // spare balance would change what they prove.
+  if (process.env.SEED_FUND_WALLETS === '1') {
+    for (const d of DEPOSITORS) {
+      await create({
+        m: 'Allocation',
+        t: 'Holding',
+        args: { issuer: cbtcIssuer, owner: dp[d], instrument: 'CBTC', amount: '2.0' },
+        actAs: [cbtcIssuer],
+        id: `seedv-wallet-${d}`,
+      })
+    }
+    console.log('wallets: 2.0 free CBTC each (available to deposit)')
+  }
+
   // Consolidate the 3 pieces into ONE 3.0 pool so LockCollateral covers the notional.
   let pool = poolPieces[0]
   for (let i = 1; i < poolPieces.length; i++) {
